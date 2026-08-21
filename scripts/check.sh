@@ -39,5 +39,9 @@ grep -q 'is_apple_silicon' install.sh
 grep -q 'Restarting the build natively for Apple Silicon' scripts/build-app.sh
 grep -q 'validate_output_app_path "$OUTPUT_APP"' scripts/build-app.sh
 
+# The smoke test must read the expected version from the manifest; a literal
+# there silently rots one release after it is written.
+! grep -qE 'CFBundleShortVersionString.*= "[0-9]' .github/workflows/release-smoke.yml
+
 git diff --check
 printf 'Planetka checks passed (v%s).\n' "$app_version"

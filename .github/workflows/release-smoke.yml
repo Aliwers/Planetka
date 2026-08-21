@@ -20,7 +20,9 @@ jobs:
         run: |
           test -x /Applications/Planetka.app/Contents/MacOS/Planetka
           test "$(plutil -extract CFBundleIdentifier raw -o - /Applications/Planetka.app/Contents/Info.plist)" = "com.local.planetka"
-          test "$(plutil -extract CFBundleShortVersionString raw -o - /Applications/Planetka.app/Contents/Info.plist)" = "0.2.40"
+          expected="$(curl -fsSL https://raw.githubusercontent.com/Aliwers/Planetka/main/update.json \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+          test "$(plutil -extract CFBundleShortVersionString raw -o - /Applications/Planetka.app/Contents/Info.plist)" = "$expected"
           file /Applications/Planetka.app/Contents/MacOS/Planetka | grep -q arm64
           codesign --verify --deep --strict /Applications/Planetka.app
           codesign -d --entitlements :- /Applications/Planetka.app > "$RUNNER_TEMP/entitlements.plist" 2>/dev/null
