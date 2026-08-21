@@ -1065,10 +1065,18 @@ enum UpdateCheckResult: String, Equatable {
     }
 }
 
-func updateCheckResult(for release: GitHubRelease?,
+func updateCheckResult(for outcome: Result<GitHubRelease, UpdateCheckFailure>,
                        currentVersion: String,
                        skippedVersions: [String]) -> UpdateCheckResult {
-    guard let release else { return .failed }
+    let release: GitHubRelease
+    switch outcome {
+    case .success(let fetched):
+        release = fetched
+    case .failure(.noReleasesPublished):
+        return .upToDate
+    case .failure:
+        return .failed
+    }
     guard isNewer(release.version, than: currentVersion) else { return .upToDate }
     return skippedVersions.contains(release.version) ? .skipped : .available
 }
@@ -8465,6 +8473,9 @@ enum UpdateCheckFailure: Error, Equatable, Sendable {
     /// A response arrived but was oversized, malformed, or carried an
     /// unusable tag.
     case unexpectedResponse
+    /// GitHub answers 404 for a repository that has no published
+    /// releases. Nothing is broken and nothing newer exists.
+    case noReleasesPublished
 }
 
 /// User-facing explanation for a failed *manual* update check. Only
@@ -8480,6 +8491,8 @@ func manualUpdateCheckFailureText(_ failure: UpdateCheckFailure) -> String {
         return "GitHub returned an error (HTTP \(code)). Try again later."
     case .unexpectedResponse:
         return "GitHub returned a response Planetka couldn't read. Try again later, or check the releases page on GitHub directly."
+    case .noReleasesPublished:
+        return "No releases have been published yet, so this build is the newest one."
     }
 }
 
@@ -8514,6 +8527,9 @@ enum UpdateCheck {
     static func parseLatest(data: Data, response: URLResponse) -> Result<GitHubRelease, UpdateCheckFailure> {
         guard let http = response as? HTTPURLResponse else {
             return .failure(.unexpectedResponse)
+        }
+        if http.statusCode == 404 {
+            return .failure(.noReleasesPublished)
         }
         guard (200..<300).contains(http.statusCode) else {
             return .failure(.httpStatus(http.statusCode))
@@ -16606,16 +16622,18 @@ final class PlanetkaApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard settings.checkForUpdates else { return }
         let outcome = await UpdateCheck.fetchLatest()
         await MainActor.run {
-            self.recordUpdateCheck(release: try? outcome.get(), source: source)
+            self.recordUpdateCheck(outcome: outcome, source: source)
             guard let release = try? outcome.get() else { return }
             self.handleFetchedRelease(release)
         }
     }
 
-    private func recordUpdateCheck(release: GitHubRelease?, source: UpdateCheckSource) {
+    private func recordUpdateCheck(outcome: Result<GitHubRelease, UpdateCheckFailure>,
+                                   source: UpdateCheckSource) {
+        let release = try? outcome.get()
         let skippedVersions = source == .manual ? [] : settings.skippedVersions
         let result = updateCheckResult(
-            for: release,
+            for: outcome,
             currentVersion: currentBundleVersion(),
             skippedVersions: skippedVersions
         )
@@ -16749,7 +16767,7 @@ final class PlanetkaApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
                   let self,
                   !self.isTerminating else { return }
             self.manualUpdateCheckTask = nil
-            self.recordUpdateCheck(release: try? outcome.get(), source: .manual)
+            self.recordUpdateCheck(outcome: outcome, source: .manual)
             self.finishManualUpdateCheck(outcome)
         }
     }
@@ -16759,6 +16777,10 @@ final class PlanetkaApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         isCheckingForUpdates = false
         let release: GitHubRelease
         switch outcome {
+        case .failure(.noReleasesPublished):
+            rebuildMenu()
+            showUpToDateAlert(currentVersion: currentBundleVersion())
+            return
         case .failure(let failure):
             rebuildMenu()
             showUpdateCheckFailedAlert(failure)
@@ -20329,8 +20351,22 @@ private enum PlanetkaSelfTest {
         )
         try expect(
             UpdateCheck.parseLatest(data: releaseData, response: notFound),
-            equals: .failure(.httpStatus(404)),
-            "update parsing should reject non-2xx HTTP responses with the status code"
+            equals: .failure(.noReleasesPublished),
+            "a repository without releases answers 404 and must not read as a failure"
+        )
+        try expect(
+            updateCheckResult(for: .failure(.noReleasesPublished),
+                              currentVersion: "1.2.3",
+                              skippedVersions: []),
+            equals: .upToDate,
+            "no published releases should record as up to date, not failed"
+        )
+        try expect(
+            updateCheckResult(for: .failure(.httpStatus(500)),
+                              currentVersion: "1.2.3",
+                              skippedVersions: []),
+            equals: .failed,
+            "a real server error should still record as failed"
         )
         let rateLimited = HTTPURLResponse(url: GITHUB_LATEST_RELEASE_URL,
                                           statusCode: 403,
@@ -20491,22 +20527,22 @@ private enum PlanetkaSelfTest {
                                     body: "",
                                     htmlURL: GITHUB_RELEASES_PAGE.absoluteString)
         try expect(
-            updateCheckResult(for: nil, currentVersion: "1.2.3", skippedVersions: []),
+            updateCheckResult(for: .failure(.network), currentVersion: "1.2.3", skippedVersions: []),
             equals: .failed,
             "nil update checks should be recorded as failed or unavailable"
         )
         try expect(
-            updateCheckResult(for: release, currentVersion: "1.2.4", skippedVersions: []),
+            updateCheckResult(for: .success(release), currentVersion: "1.2.4", skippedVersions: []),
             equals: .upToDate,
             "equal release versions should be recorded as up to date"
         )
         try expect(
-            updateCheckResult(for: release, currentVersion: "1.2.3", skippedVersions: []),
+            updateCheckResult(for: .success(release), currentVersion: "1.2.3", skippedVersions: []),
             equals: .available,
             "newer releases should be recorded as available"
         )
         try expect(
-            updateCheckResult(for: release, currentVersion: "1.2.3", skippedVersions: ["1.2.4"]),
+            updateCheckResult(for: .success(release), currentVersion: "1.2.3", skippedVersions: ["1.2.4"]),
             equals: .skipped,
             "skipped newer releases should be recorded distinctly"
         )
@@ -23305,6 +23341,11 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
                     self.settings.lastUpdateCheckResult = .upToDate
                     self.updateState = .upToDate(currentBundleVersion())
                 }
+            case .failure(.noReleasesPublished):
+                self.settings.lastUpdateCheckAt = Date()
+                self.settings.lastUpdateCheckSource = .manual
+                self.settings.lastUpdateCheckResult = .upToDate
+                self.updateState = .upToDate(currentBundleVersion())
             case .failure(let failure):
                 self.settings.lastUpdateCheckAt = Date()
                 self.settings.lastUpdateCheckSource = .manual
@@ -23327,6 +23368,8 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
             return "GitHub вернул ошибку HTTP \(code). Повторите попытку позже."
         case .unexpectedResponse:
             return "GitHub вернул ответ, который Planetka не смог проверить."
+        case .noReleasesPublished:
+            return "Релизов ещё нет, поэтому установленная сборка и есть самая новая."
         }
     }
 
