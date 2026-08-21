@@ -1,4 +1,4 @@
-# SuperDictate
+# Planetka
 
 ## Установить за минуту
 
@@ -8,10 +8,10 @@
 2. Вставьте эту команду и нажмите Enter:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/shlgd/SuperDictate/v0.2.40/install.sh | /usr/bin/arch -arm64 /bin/bash
+curl -fsSL https://raw.githubusercontent.com/Aliwers/Planetka/v0.2.40/install.sh | /usr/bin/arch -arm64 /bin/bash
 ```
 
-3. В открывшемся SuperDictate нажмите `Разрешить` для **Микрофона**,
+3. В открывшемся Planetka нажмите `Разрешить` для **Микрофона**,
    **Универсального доступа** и **Мониторинга ввода**.
 4. Дождитесь статуса `Работает`, нажмите **правый Command** и говорите.
    Нажмите **правый Command** ещё раз, чтобы вставить текст.
@@ -20,30 +20,30 @@ curl -fsSL https://raw.githubusercontent.com/shlgd/SuperDictate/v0.2.40/install.
 диске она занимает около 460 МБ; для установки лучше иметь не менее 1 ГБ
 свободного места. После загрузки интернет для диктовки не нужен.
 
-SuperDictate — быстрая локальная диктовка для macOS. Аудио и расшифровка не
+Planetka — быстрая локальная диктовка для macOS. Аудио и расшифровка не
 отправляются в облачный API. Единственное исключение — необязательная AI-чистка
 текста: она выключена по умолчанию и, если вы её включите, отправляет готовый
 текст на выбранный вами сервер (см. ниже).
 
 ## Обновиться
 
-**Если в SuperDictate уже есть кнопка `Обновить`:** откройте приложение из
+**Если в Planetka уже есть кнопка `Обновить`:** откройте приложение из
 папки Applications и нажмите эту кнопку. Приложение само скачает и проверит
 новую версию, заменит старую и запустится заново.
 
-**Если SuperDictate был установлен до появления кнопки обновления:** ничего не
+**Если Planetka был установлен до появления кнопки обновления:** ничего не
 удаляйте. Откройте Terminal и ещё раз выполните ту же команду:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/shlgd/SuperDictate/main/install.sh | /usr/bin/arch -arm64 /bin/bash
+curl -fsSL https://raw.githubusercontent.com/Aliwers/Planetka/main/install.sh | /usr/bin/arch -arm64 /bin/bash
 ```
 
-Команда заменяет только `/Applications/SuperDictate.app`. История, настройки и
+Команда заменяет только `/Applications/Planetka.app`. История, настройки и
 уже загруженная модель остаются на месте. После этого следующие обновления
 можно устанавливать прямо из приложения.
 
 Последнюю опубликованную версию также всегда можно увидеть на странице
-[GitHub Releases](https://github.com/shlgd/SuperDictate/releases/latest).
+[GitHub Releases](https://github.com/Aliwers/Planetka/releases/latest).
 
 ## Горячие клавиши
 
@@ -62,7 +62,7 @@ curl -fsSL https://raw.githubusercontent.com/shlgd/SuperDictate/main/install.sh 
 - Пока открыто окно записи нового сочетания, глобальная диктовка временно
   приостанавливается. Нажатые клавиши только записывают новый хоткей и ничего
   не запускают.
-- Откройте `SuperDictate` из Applications, чтобы проверить службу,
+- Откройте `Planetka` из Applications, чтобы проверить службу,
   разрешения и обновления. Настройки открываются кнопкой-шестерёнкой.
 
 ## Панель управления
@@ -114,7 +114,7 @@ macOS не разрешает приложению выдать их самом�
 - **Accessibility** — находить активное поле и вставлять готовый текст.
 - **Input Monitoring** — видеть глобальную горячую клавишу.
 
-Если после выдачи разрешений статус не стал `Ready`, откройте SuperDictate и
+Если после выдачи разрешений статус не стал `Ready`, откройте Planetka и
 нажмите `Restart` у фоновой службы. Если приложение не появилось в системном
 списке, нажмите `Try Again` у соответствующего разрешения.
 
@@ -122,11 +122,11 @@ macOS не разрешает приложению выдать их самом�
 
 Установщик:
 
-1. Загружает `SuperDictate.zip` из
-   [GitHub Releases](https://github.com/shlgd/SuperDictate/releases).
+1. Загружает `Planetka.zip` из
+   [GitHub Releases](https://github.com/Aliwers/Planetka/releases).
 2. Проверяет закреплённую SHA-256, версию, bundle ID, архитектуру arm64,
    подпись и microphone-entitlements.
-3. Безопасно заменяет `/Applications/SuperDictate.app` и открывает панель.
+3. Безопасно заменяет `/Applications/Planetka.app` и открывает панель.
 
 Xcode и Command Line Tools для обычной установки не нужны. История, настройки
 и уже загруженная модель при обновлении сохраняются.
@@ -135,7 +135,7 @@ Xcode и Command Line Tools для обычной установки не нуж
 
 ### Если установлена v0.2.26 или новее
 
-1. Откройте `SuperDictate` из папки Applications.
+1. Откройте `Planetka` из папки Applications.
 2. В нижней строке панель сама покажет новую версию.
 3. Нажмите `Обновить`.
 
@@ -152,7 +152,7 @@ Xcode и Command Line Tools для обычной установки не нуж
 Эта же команда остаётся запасным способом для любой версии:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/shlgd/SuperDictate/v0.2.40/install.sh | /usr/bin/arch -arm64 /bin/bash
+curl -fsSL https://raw.githubusercontent.com/Aliwers/Planetka/v0.2.40/install.sh | /usr/bin/arch -arm64 /bin/bash
 ```
 
 Приложение само не устанавливает обновления в фоне: запуск обновления всегда
@@ -166,7 +166,7 @@ curl -fsSL https://raw.githubusercontent.com/shlgd/SuperDictate/v0.2.40/install.
 результат в `/Applications`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/shlgd/SuperDictate/v0.2.40/install.sh | SUPERDICTATE_BUILD_FROM_SOURCE=1 /usr/bin/arch -arm64 /bin/bash
+curl -fsSL https://raw.githubusercontent.com/Aliwers/Planetka/v0.2.40/install.sh | PLANETKA_BUILD_FROM_SOURCE=1 /usr/bin/arch -arm64 /bin/bash
 ```
 
 Понадобятся бесплатные Apple Command Line Tools. Если их нет, установщик
@@ -175,30 +175,30 @@ curl -fsSL https://raw.githubusercontent.com/shlgd/SuperDictate/v0.2.40/install.
 
 По умолчанию сборка из исходников скачивает точный коммит исходного кода
 релиза и проверяет его через GitHub. Для разработки можно передать свои
-`SUPERDICTATE_REF` и `SUPERDICTATE_SOURCE_COMMIT`; без совпадения коммита
+`PLANETKA_REF` и `PLANETKA_SOURCE_COMMIT`; без совпадения коммита
 установщик не запустит скачанный `scripts/build-app.sh`.
 
 ### Ручная сборка для разработки
 
 ```bash
 xcode-select --install
-git clone https://github.com/shlgd/SuperDictate.git
-cd SuperDictate
-swift run -c debug --package-path swift Parakey --self-test all
-./scripts/build-app.sh ./dist/SuperDictate.app
-open ./dist/SuperDictate.app
+git clone https://github.com/Aliwers/Planetka.git
+cd Planetka
+swift run -c debug --package-path swift Planetka --self-test all
+./scripts/build-app.sh ./dist/Planetka.app
+open ./dist/Planetka.app
 ```
 
 По умолчанию локальная сборка подписывается ad-hoc. Чтобы использовать свой
 сертификат, передайте его имя:
 
 ```bash
-SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./scripts/build-app.sh ./dist/SuperDictate.app
+SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./scripts/build-app.sh ./dist/Planetka.app
 ```
 
-Не перемещайте и не удаляйте `dist/SuperDictate.app`, пока фоновая служба
+Не перемещайте и не удаляйте `dist/Planetka.app`, пока фоновая служба
 запущена из этой сборки. Для обычного использования предпочтительнее команда
-с `SUPERDICTATE_BUILD_FROM_SOURCE=1`, которая ставит приложение в
+с `PLANETKA_BUILD_FROM_SOURCE=1`, которая ставит приложение в
 `/Applications`.
 
 ## Проверки перед pull request
@@ -206,9 +206,9 @@ SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./scripts/build-app.sh ./d
 ```bash
 bash -n install.sh uninstall.sh scripts/build-app.sh
 plutil -lint swift/Info.plist entitlements.plist
-swift run -c debug --package-path swift Parakey --self-test all
-./scripts/build-app.sh ./dist/SuperDictate.app
-codesign --verify --deep --strict ./dist/SuperDictate.app
+swift run -c debug --package-path swift Planetka --self-test all
+./scripts/build-app.sh ./dist/Planetka.app
+codesign --verify --deep --strict ./dist/Planetka.app
 ```
 
 GitHub Actions повторяет самотесты, собирает bundle, прогоняет установщик на
@@ -238,10 +238,10 @@ GitHub Actions повторяет самотесты, собирает bundle, �
 
 ## Данные и приватность
 
-- История и настройки: `~/Library/Application Support/SuperDictate`.
+- История и настройки: `~/Library/Application Support/Planetka`.
 - Модель FluidAudio: `~/Library/Application Support/FluidAudio/Models`.
-- LaunchAgent: `~/Library/LaunchAgents/com.local.superdictate.agent.plist`.
-- Логи: `~/Library/Logs/SuperDictate*`.
+- LaunchAgent: `~/Library/LaunchAgents/com.local.planetka.agent.plist`.
+- Логи: `~/Library/Logs/Planetka*`.
 - Ключ API для AI-чистки: только в Связке ключей macOS.
 - Аналитики, аккаунтов и телеметрии нет.
 
@@ -250,7 +250,7 @@ GitHub Actions повторяет самотесты, собирает bundle, �
 ## Удаление
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/shlgd/SuperDictate/v0.2.40/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Aliwers/Planetka/v0.2.40/uninstall.sh | bash
 ```
 
 Приложение и фоновая служба удаляются. История, настройки и модель сохраняются,
@@ -258,7 +258,7 @@ curl -fsSL https://raw.githubusercontent.com/shlgd/SuperDictate/v0.2.40/uninstal
 
 ## Происхождение и лицензия
 
-SuperDictate основан на открытом проекте
+Planetka основан на открытом проекте
 [Parakey](https://github.com/rcourtman/parakey) Richard Courtman. Исходный и
 изменённый код распространяется по лицензии MIT. См. [LICENSE](LICENSE) и
 [NOTICE.md](NOTICE.md).

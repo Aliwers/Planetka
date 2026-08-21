@@ -29,10 +29,10 @@ manifest_sha256="$(plutil -extract sha256 raw -o - update.json)"
 grep -q 'com.apple.security.device.audio-input' entitlements.plist
 grep -q 'com.apple.security.device.microphone' entitlements.plist
 
-! grep -q 'raw.githubusercontent.com/shlgd/SuperDictate/main/' README.md
-grep -q 'raw.githubusercontent.com/shlgd/SuperDictate/v'"$app_version"'/' README.md
-grep -q '^REF="${SUPERDICTATE_REF:-\$SOURCE_COMMIT}"$' install.sh
-grep -q '^EXPECTED_SOURCE_COMMIT="${SUPERDICTATE_SOURCE_COMMIT:-\$SOURCE_COMMIT}"$' install.sh
+! grep -q 'raw.githubusercontent.com/Aliwers/Planetka/main/' README.md
+grep -q 'raw.githubusercontent.com/Aliwers/Planetka/v'"$app_version"'/' README.md
+grep -q '^REF="${PLANETKA_REF:-\$SOURCE_COMMIT}"$' install.sh
+grep -q '^EXPECTED_SOURCE_COMMIT="${PLANETKA_SOURCE_COMMIT:-\$SOURCE_COMMIT}"$' install.sh
 grep -q 'verify_source_ref' install.sh
 grep -q 'sysctl.proc_translated' install.sh
 grep -q 'is_apple_silicon' install.sh
@@ -40,4 +40,4 @@ grep -q 'Restarting the build natively for Apple Silicon' scripts/build-app.sh
 grep -q 'validate_output_app_path "$OUTPUT_APP"' scripts/build-app.sh
 
 git diff --check
-printf 'SuperDictate checks passed (v%s).\n' "$app_version"
+printf 'Planetka checks passed (v%s).\n' "$app_version"

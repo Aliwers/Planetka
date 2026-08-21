@@ -3,15 +3,15 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUTPUT_APP="${1:-$ROOT_DIR/dist/SuperDictate.app}"
+OUTPUT_APP="${1:-$ROOT_DIR/dist/Planetka.app}"
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 
 say() {
-    printf 'SuperDictate: %s\n' "$*"
+    printf 'Planetka: %s\n' "$*"
 }
 
 fail() {
-    printf 'SuperDictate: %s\n' "$*" >&2
+    printf 'Planetka: %s\n' "$*" >&2
     exit 1
 }
 
@@ -50,20 +50,20 @@ command -v codesign >/dev/null 2>&1 || fail "codesign is missing. Run: xcode-sel
 say "Building the release app..."
 swift build -c release --package-path "$ROOT_DIR/swift"
 BIN_DIR="$(swift build -c release --package-path "$ROOT_DIR/swift" --show-bin-path)"
-BIN="$BIN_DIR/Parakey"
+BIN="$BIN_DIR/Planetka"
 [[ -x "$BIN" ]] || fail "The Swift build did not produce $BIN"
 
-STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/superdictate-build.XXXXXX")"
+STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/planetka-build.XXXXXX")"
 trap 'rm -rf "$STAGE_DIR"' EXIT
-STAGE_APP="$STAGE_DIR/SuperDictate.app"
+STAGE_APP="$STAGE_DIR/Planetka.app"
 
 mkdir -p "$STAGE_APP/Contents/MacOS" "$STAGE_APP/Contents/Resources"
-cp "$BIN" "$STAGE_APP/Contents/MacOS/SuperDictate"
+cp "$BIN" "$STAGE_APP/Contents/MacOS/Planetka"
 cp "$ROOT_DIR/swift/Info.plist" "$STAGE_APP/Contents/Info.plist"
-cp "$ROOT_DIR/swift/Resources/parakey-menubar.png" "$STAGE_APP/Contents/Resources/"
-cp "$ROOT_DIR/swift/Resources/parakey-menubar@2x.png" "$STAGE_APP/Contents/Resources/"
-cp "$ROOT_DIR/icon/Parakey.icns" "$STAGE_APP/Contents/Resources/Parakey.icns"
-chmod 755 "$STAGE_APP/Contents/MacOS/SuperDictate"
+cp "$ROOT_DIR/swift/Resources/planetka-menubar.png" "$STAGE_APP/Contents/Resources/"
+cp "$ROOT_DIR/swift/Resources/planetka-menubar@2x.png" "$STAGE_APP/Contents/Resources/"
+cp "$ROOT_DIR/icon/Planetka.icns" "$STAGE_APP/Contents/Resources/Planetka.icns"
+chmod 755 "$STAGE_APP/Contents/MacOS/Planetka"
 
 SIGN_ARGS=(--force --deep --sign "$SIGN_IDENTITY" --options runtime
            --entitlements "$ROOT_DIR/entitlements.plist")

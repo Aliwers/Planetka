@@ -1,11 +1,11 @@
-# SuperDictate Development Invariants
+# Planetka Development Invariants
 
 ## One Installed Application
 
-- The only runnable installed bundle is `/Applications/SuperDictate.app`.
-- Always use bundle identifier `com.local.superdictate`.
+- The only runnable installed bundle is `/Applications/Planetka.app`.
+- Always use bundle identifier `com.local.planetka`.
 - Local installation must atomically replace that bundle and restart only
-  `com.local.superdictate.agent`.
+  `com.local.planetka.agent`.
 - Never launch a copied, test, smoke, or temporary `.app` bundle. Exercise
   diagnostics through the command-line self-tests instead.
 - Never change the signing identity during an installation. On this Mac,

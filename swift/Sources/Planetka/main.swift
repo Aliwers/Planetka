@@ -1,4 +1,4 @@
-// Parakey — push-to-talk dictation for macOS Apple Silicon.
+// Planetka — push-to-talk dictation for macOS Apple Silicon.
 //
 // Swift menu-bar app. The runtime covers hotkey capture (`CGEventTap`), audio capture
 // (`AVAudioEngine`), transcription (`FluidAudio` on the Apple
@@ -45,7 +45,14 @@ let PENDING_DICTATION_FILE_VERSION: UInt32 = 1
 let PENDING_DICTATION_HEADER_SIZE = 16
 let PENDING_DICTATION_MAX_SECONDS: TimeInterval = 30 * 60
 let PENDING_DICTATION_MAX_BYTES = Int(PENDING_DICTATION_MAX_SECONDS * SAMPLE_RATE * 4) + PENDING_DICTATION_HEADER_SIZE
-let DEFAULT_HOTKEY_KEYCODE: CGKeyCode = 54  // Right Command
+let DEFAULT_HOTKEY_KEYCODE: CGKeyCode = 63  // Fn (see FN_KEYCODE below — literal to avoid a forward reference in main.swift's top-to-bottom init order)
+/// `.holdOrDoubleTap` window tuning: a press held shorter than this counts
+/// as "a tap" rather than a deliberate push-to-talk hold; a second tap
+/// arriving within this long after the first tap's release confirms a
+/// double-tap (hands-free). Same value reused for both — a snappy,
+/// Aqua-Voice-like feel. Revisit against real usage if taps feel mistimed.
+let HOTKEY_TAP_MAX_HOLD_DURATION: TimeInterval = 0.35
+let HOTKEY_DOUBLE_TAP_WINDOW: TimeInterval = 0.35
 let RIGHT_COMMAND_KEYCODE: CGKeyCode = 54
 let LEFT_COMMAND_KEYCODE: CGKeyCode = 55
 let RIGHT_OPTION_KEYCODE: CGKeyCode = 61
@@ -58,24 +65,24 @@ let MIN_CLIP_SECONDS: Double = 0.25
 let UPDATE_CHECK_FIRST_DELAY_SECONDS: TimeInterval = 30
 let UPDATE_CHECK_INTERVAL_SECONDS: TimeInterval = 6 * 3600  // 6h
 let UPDATE_REMIND_LATER_SECONDS: TimeInterval = 24 * 3600  // 24h
-let GITHUB_LATEST_RELEASE_URL = URL(string: "https://api.github.com/repos/shlgd/SuperDictate/releases/latest")!
-let GITHUB_REPOSITORY_PAGE = URL(string: "https://github.com/shlgd/SuperDictate")!
-let GITHUB_RELEASES_PAGE = URL(string: "https://github.com/shlgd/SuperDictate/releases/latest")!
-let GITHUB_UPDATE_MANIFEST_URL = URL(string: "https://raw.githubusercontent.com/shlgd/SuperDictate/main/update.json")!
+let GITHUB_LATEST_RELEASE_URL = URL(string: "https://api.github.com/repos/Aliwers/Planetka/releases/latest")!
+let GITHUB_REPOSITORY_PAGE = URL(string: "https://github.com/Aliwers/Planetka")!
+let GITHUB_RELEASES_PAGE = URL(string: "https://github.com/Aliwers/Planetka/releases/latest")!
+let GITHUB_UPDATE_MANIFEST_URL = URL(string: "https://raw.githubusercontent.com/Aliwers/Planetka/main/update.json")!
 let UPDATE_ARCHIVE_MAX_BYTES = 64 * 1024 * 1024
-let HOMEBREW_CASK_TAP = "shlgd/superdictate"
-let HOMEBREW_CASK_TOKEN = "shlgd/superdictate/superdictate"
-let HOMEBREW_CASK_INSTALLED_TOKEN = "parakey"
-let INSTALLED_APP_BUNDLE_PATH = "/Applications/SuperDictate.app"
+let HOMEBREW_CASK_TAP = "Aliwers/planetka"
+let HOMEBREW_CASK_TOKEN = "Aliwers/planetka/planetka"
+let HOMEBREW_CASK_INSTALLED_TOKEN = "planetka"
+let INSTALLED_APP_BUNDLE_PATH = "/Applications/Planetka.app"
 let AGENT_ARGUMENT = "--agent"
-let AGENT_LABEL = "com.local.superdictate.agent"
-let APP_SUPPORT_DIR_NAME = "SuperDictate"
+let AGENT_LABEL = "com.local.planetka.agent"
+let APP_SUPPORT_DIR_NAME = "Planetka"
 let AGENT_STATUS_FILE_NAME = "AgentStatus.json"
 let CONTROL_PANEL_PID_FILE_NAME = "ControlPanel.pid"
 let UPDATE_HELPER_LOG_PATH = (NSHomeDirectory() as NSString)
-    .appendingPathComponent("Library/Logs/SuperDictate-update.log")
+    .appendingPathComponent("Library/Logs/Planetka-update.log")
 let UPDATE_PROGRESS_ARGUMENT = "--update-progress"
-let UPDATE_PROGRESS_APP_PREFIX = "SuperDictate-update-progress-"
+let UPDATE_PROGRESS_APP_PREFIX = "Planetka-update-progress-"
 let MAX_SKIPPED_UPDATE_VERSIONS = 20
 let MAX_CORRECTION_SYNC_PATH_BYTES = 4096
 let MAX_INPUT_DEVICE_PREFERENCE_BYTES = 512
@@ -96,9 +103,9 @@ let RECORDING_HUD_DISPLAY_LINK_MAX_FPS: Float = 120
 let RECORDING_HUD_RECORDING_BASE_PHASE_SPEED: CGFloat = 16.96
 let RECORDING_HUD_RECORDING_LEVEL_PHASE_SPEED: CGFloat = 10.08
 let RECORDING_HUD_TRANSCRIBING_PHASE_SPEED: CGFloat = 10.2
-let HOTKEY_CAPTURE_BEGIN_NOTIFICATION = Notification.Name("com.local.superdictate.hotkey-capture-begin")
-let HOTKEY_CAPTURE_END_NOTIFICATION = Notification.Name("com.local.superdictate.hotkey-capture-end")
-let SETTINGS_CHANGED_NOTIFICATION = Notification.Name("com.local.superdictate.settings-changed")
+let HOTKEY_CAPTURE_BEGIN_NOTIFICATION = Notification.Name("com.local.planetka.hotkey-capture-begin")
+let HOTKEY_CAPTURE_END_NOTIFICATION = Notification.Name("com.local.planetka.hotkey-capture-end")
+let SETTINGS_CHANGED_NOTIFICATION = Notification.Name("com.local.planetka.settings-changed")
 let HOTKEY_CAPTURE_FAILSAFE_SECONDS: TimeInterval = 45
 let DICTATION_ERROR_FLASH_SECONDS: TimeInterval = 1.5  // how long the menu-bar icon flags a dropped dictation before returning to idle
 let AUDIO_START_RETRY_DELAYS_SECONDS: [UInt64] = [1, 3, 8]
@@ -106,10 +113,17 @@ let AUDIO_IDLE_STOP_DELAY_SECONDS: TimeInterval = 5
 let AUDIO_CONFIGURATION_CHANGE_SUPPRESSION_SECONDS: TimeInterval = 1
 let MODEL_DOWNLOAD_HEADROOM_BYTES: Int64 = 500 * 1024 * 1024
 
-let SETTINGS_SUITE = "com.local.superdictate"
-let CORRECTIONS_FILE_UTI = "com.local.superdictate.corrections"
-let CORRECTIONS_FILE_EXTENSION = "superdictate-corrections"
-let CORRECTIONS_FILE_NAME = "SuperDictate Corrections.\(CORRECTIONS_FILE_EXTENSION)"
+let SETTINGS_SUITE = "com.local.planetka"
+// The app shipped as SuperDictate until 0.2.40. Everything it stored is keyed
+// by that identity, so the names survive here purely to migrate it once.
+let LEGACY_BUNDLE_IDENTIFIER = "com.local.superdictate"
+let LEGACY_APP_SUPPORT_DIR_NAME = "SuperDictate"
+let LEGACY_AGENT_LABEL = "\(LEGACY_BUNDLE_IDENTIFIER).agent"
+let LEGACY_AI_KEYCHAIN_SERVICE = "\(LEGACY_BUNDLE_IDENTIFIER).ai"
+let LEGACY_MIGRATION_DEFAULTS_KEY = "legacyRenameMigrationCompleted"
+let CORRECTIONS_FILE_UTI = "com.local.planetka.corrections"
+let CORRECTIONS_FILE_EXTENSION = "planetka-corrections"
+let CORRECTIONS_FILE_NAME = "Planetka Corrections.\(CORRECTIONS_FILE_EXTENSION)"
 let MAX_TRANSCRIPT_CORRECTIONS = 512
 let MAX_TRANSCRIPT_CORRECTION_SOURCE_BYTES = 512
 let MAX_TRANSCRIPT_CORRECTION_REPLACEMENT_BYTES = 4096
@@ -203,6 +217,7 @@ let FUNCTION_KEY_NAMES_BY_KEYCODE: [CGKeyCode: String] = [
 ]
 
 let HOTKEY_CHOICES: [HotkeyChoice] = [
+    MODIFIER_HOTKEY_CHOICES.first(where: { $0.keycode == FN_KEYCODE })!,
     MODIFIER_HOTKEY_CHOICES.first(where: { $0.keycode == 62 })!,
     MODIFIER_HOTKEY_CHOICES.first(where: { $0.keycode == 61 })!,
     MODIFIER_HOTKEY_CHOICES.first(where: { $0.keycode == 54 })!,
@@ -304,11 +319,25 @@ func normalizedHotkeyKeycode(storedValue value: Any?) -> CGKeyCode? {
     return CGKeyCode(raw)
 }
 
-enum TriggerMode: String { case hold, toggle }
+/// `.holdOrDoubleTap` (Aqua Voice-style): a normal hold behaves like
+/// `.hold` — release stops. A quick tap-release followed by a second
+/// tap within `HOTKEY_DOUBLE_TAP_WINDOW` behaves like `.toggle` instead
+/// — recording keeps going hands-free until the next press.
+enum TriggerMode: String { case hold, toggle, holdOrDoubleTap }
 let TRIGGER_DISPLAY: [TriggerMode: String] = [
     .hold: "Press and hold",
     .toggle: "Press to toggle",
+    .holdOrDoubleTap: "Hold, or double-tap for hands-free",
 ]
+
+/// Short verb phrase for "<verb> <hotkey name> to dictate"-style copy.
+func hotkeyTriggerVerb(_ mode: TriggerMode) -> String {
+    switch mode {
+    case .hold: return "Hold"
+    case .toggle: return "Press"
+    case .holdOrDoubleTap: return "Hold or double-tap"
+    }
+}
 
 enum DictationCompletionBehavior: String, CaseIterable {
     case insert
@@ -504,9 +533,9 @@ enum SpeechModelProfile: String, CaseIterable {
     var cacheResetDetail: String {
         switch self {
         case .multilingualV3:
-            return "Parakey will delete the local Parakeet TDT v3 model cache, unload the current speech model, and download a fresh verified copy before dictation is available again."
+            return "Planetka will delete the local Parakeet TDT v3 model cache, unload the current speech model, and download a fresh verified copy before dictation is available again."
         case .englishUnified:
-            return "Parakey will delete the local Parakeet TDT v3 model cache, unload the current speech model, and download a fresh verified copy before dictation is available again."
+            return "Planetka will delete the local Parakeet TDT v3 model cache, unload the current speech model, and download a fresh verified copy before dictation is available again."
         }
     }
 
@@ -1123,7 +1152,7 @@ enum TranscriptCorrectionsDocumentError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .unsupportedSchema(let version):
-            return "This corrections file uses schema version \(version), which this version of Parakey cannot read."
+            return "This corrections file uses schema version \(version), which this version of Planetka cannot read."
         }
     }
 }
@@ -1137,7 +1166,7 @@ enum TranscriptCorrectionsTransferError: LocalizedError {
         case .fileTooLarge(let bytes, let limit):
             let actual = ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
             let maximum = ByteCountFormatter.string(fromByteCount: Int64(limit), countStyle: .file)
-            return "This corrections file is \(actual), which is larger than Parakey's \(maximum) import limit."
+            return "This corrections file is \(actual), which is larger than Planetka's \(maximum) import limit."
         case .notRegularFile:
             return "The selected corrections path is not a regular file."
         }
@@ -1303,7 +1332,7 @@ enum TranscriptCorrectionsSyncPathError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .isSymbolicLink:
-            return "The text correction sync file is a symbolic link. Parakey refuses to sync through symlinks. Reconnect Parakey to a regular file."
+            return "The text correction sync file is a symbolic link. Planetka refuses to sync through symlinks. Reconnect Planetka to a regular file."
         }
     }
 }
@@ -1336,7 +1365,7 @@ func shouldStopCorrectionSync(afterPathValidationError error: Error) -> Bool {
 // MARK: - Model registry hardening
 //
 // FluidAudio reads REGISTRY_URL and MODEL_REGISTRY_URL from the process
-// environment to override the speech-model download base URL. Parakey
+// environment to override the speech-model download base URL. Planetka
 // does not document either as a feature, so a value here means either
 // (a) a developer is debugging a mirror — uncommon — or (b) a process
 // or LaunchAgent has injected one to redirect first-launch model
@@ -1364,13 +1393,13 @@ func refuseHostileRegistryEnvironmentAndExit() {
     log("refusing to start: registry override env var(s) set: \(names)")
     let alert = NSAlert()
     alert.alertStyle = .critical
-    alert.messageText = "Parakey refused to start"
+    alert.messageText = "Planetka refused to start"
     alert.informativeText = """
-        These environment variable(s) are set in Parakey's process: \(names).
+        These environment variable(s) are set in Planetka's process: \(names).
 
-        FluidAudio uses them to override the speech-model download URL. Parakey does not support this and treats it as a sign that the launch environment has been tampered with.
+        FluidAudio uses them to override the speech-model download URL. Planetka does not support this and treats it as a sign that the launch environment has been tampered with.
 
-        Check ~/Library/LaunchAgents/, your shell rc files, and any parent process. Once the variables are gone, launch Parakey again.
+        Check ~/Library/LaunchAgents/, your shell rc files, and any parent process. Once the variables are gone, launch Planetka again.
         """
     alert.addButton(withTitle: "Quit")
     alert.runModal()
@@ -1380,11 +1409,11 @@ func refuseHostileRegistryEnvironmentAndExit() {
 // MARK: - Speech model integrity
 //
 // FluidAudio owns the Hugging Face download mechanics, but it does not
-// pin the downloaded CoreML bundle contents. Parakey downloads first,
+// pin the downloaded CoreML bundle contents. Planetka downloads first,
 // verifies the files that will be loaded by CoreML, and only then asks
 // FluidAudio to compile/load the models. The manifest is intentionally
 // tied to one upstream repo commit; a legitimate upstream model change
-// should arrive as an explicit Parakey update with refreshed hashes.
+// should arrive as an explicit Planetka update with refreshed hashes.
 
 struct ModelFileDigest: Equatable {
     let relativePath: String
@@ -1705,7 +1734,7 @@ func speechModelDiskSpaceFailureDetail(profile: SpeechModelProfile,
         return nil
     }
     return """
-    Parakey needs \(profile.downloadSizeText) of free disk space to download \(profile.shortName), plus room for CoreML to prepare it.
+    Planetka needs \(profile.downloadSizeText) of free disk space to download \(profile.shortName), plus room for CoreML to prepare it.
 
     Available: \(formattedByteCount(UInt64(availableBytes)))
     Needed: \(formattedByteCount(UInt64(requiredBytes)))
@@ -1739,7 +1768,7 @@ func assertSufficientDiskSpaceForSpeechModelDownload(profile: SpeechModelProfile
                                                         requiredBytes: requiredBytes) else {
         return
     }
-    throw NSError(domain: "Parakey",
+    throw NSError(domain: "Planetka",
                   code: -8,
                   userInfo: [NSLocalizedDescriptionKey: detail])
 }
@@ -1747,7 +1776,7 @@ func assertSufficientDiskSpaceForSpeechModelDownload(profile: SpeechModelProfile
 func removeSpeechModelCacheDirectory(_ cacheDir: URL) async throws -> Bool {
     guard isSafeSpeechModelCacheDirectory(cacheDir) else {
         throw NSError(
-            domain: "Parakey",
+            domain: "Planetka",
             code: -3,
             userInfo: [
                 NSLocalizedDescriptionKey: "Refusing to remove unexpected speech model cache path: \(cacheDir.path)"
@@ -1762,7 +1791,7 @@ func removeSpeechModelCacheDirectory(_ cacheDir: URL) async throws -> Bool {
         }
         guard isExistingSpeechModelCacheDirectorySafeForRemoval(cacheDir) else {
             throw NSError(
-                domain: "Parakey",
+                domain: "Planetka",
                 code: -4,
                 userInfo: [
                     NSLocalizedDescriptionKey: "Refusing to remove unsafe speech model cache path: \(cacheDir.path)"
@@ -1828,7 +1857,7 @@ func correctionImportCountText(sourceName: String, originalCount: Int, keptCount
     guard originalCount > keptCount else {
         return "\(sourceName) contains \(keptCount) corrections."
     }
-    return "\(sourceName) contains \(originalCount) entries; only the first \(keptCount) valid corrections (Parakey keeps at most \(MAX_TRANSCRIPT_CORRECTIONS)) will be imported."
+    return "\(sourceName) contains \(originalCount) entries; only the first \(keptCount) valid corrections (Planetka keeps at most \(MAX_TRANSCRIPT_CORRECTIONS)) will be imported."
 }
 
 /// Appended to the import dialog when choosing Merge would push the
@@ -1839,7 +1868,7 @@ func correctionImportMergeCapWarningText(existingCount: Int,
                                          cap: Int = MAX_TRANSCRIPT_CORRECTIONS) -> String? {
     let mergedCount = existingCount + newCount
     guard mergedCount > cap else { return nil }
-    return "Merging would produce \(mergedCount) corrections; Parakey keeps at most \(cap), so \(mergedCount - cap) would be dropped."
+    return "Merging would produce \(mergedCount) corrections; Planetka keeps at most \(cap), so \(mergedCount - cap) would be dropped."
 }
 
 private func utf8ClippedPrefix(_ text: String, maxBytes: Int) -> String {
@@ -2172,19 +2201,19 @@ func shouldRestartAudioInputForSettingsChange(previousPreference: String,
 // MARK: - Logger
 //
 // All output goes to stderr (line-buffered, so we don't lose lines
-// across an abrupt exit) and to ~/Library/Logs/SuperDictate.log.
+// across an abrupt exit) and to ~/Library/Logs/Planetka.log.
 
 final class Logger: @unchecked Sendable {
     static let shared = Logger()
     private let url: URL
-    private let q = DispatchQueue(label: "ParakeyLogger")
+    private let q = DispatchQueue(label: "PlanetkaLogger")
 
     var fileURL: URL { url }
 
     init() {
         let logs = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Logs", isDirectory: true)
-        url = logs.appendingPathComponent("SuperDictate.log")
+        url = logs.appendingPathComponent("Planetka.log")
     }
 
     func log(_ msg: String) {
@@ -2205,7 +2234,7 @@ final class Logger: @unchecked Sendable {
 
 func log(_ msg: String) { Logger.shared.log(msg) }
 
-func superDictateApplicationSupportDirectory() throws -> URL {
+func planetkaApplicationSupportDirectory() throws -> URL {
     let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent(APP_SUPPORT_DIR_NAME, isDirectory: true)
     try FileManager.default.createDirectory(at: url,
@@ -2237,7 +2266,7 @@ struct AgentRuntimeState: Codable {
 
 enum AgentRuntimeStateStore {
     static var url: URL {
-        (try? superDictateApplicationSupportDirectory()
+        (try? planetkaApplicationSupportDirectory()
             .appendingPathComponent(AGENT_STATUS_FILE_NAME)) ??
         FileManager.default.temporaryDirectory.appendingPathComponent(AGENT_STATUS_FILE_NAME)
     }
@@ -2261,9 +2290,9 @@ enum AgentRuntimeStateStore {
     }
 }
 
-enum SuperDictateControlPanelRegistry {
+enum PlanetkaControlPanelRegistry {
     static var url: URL {
-        (try? superDictateApplicationSupportDirectory()
+        (try? planetkaApplicationSupportDirectory()
             .appendingPathComponent(CONTROL_PANEL_PID_FILE_NAME)) ??
         FileManager.default.temporaryDirectory.appendingPathComponent(CONTROL_PANEL_PID_FILE_NAME)
     }
@@ -2354,7 +2383,7 @@ struct ProcessRunResult {
     let output: String
 }
 
-enum SuperDictateAgentService {
+enum PlanetkaAgentService {
     static var launchAgentURL: URL {
         let directory = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/LaunchAgents", isDirectory: true)
@@ -2364,12 +2393,29 @@ enum SuperDictateAgentService {
     static var launchDomain: String { "gui/\(getuid())" }
     static var launchService: String { "\(launchDomain)/\(AGENT_LABEL)" }
 
+    // The agent always runs from the single installed bundle. Recording
+    // `Bundle.main` here pinned launchd to whichever copy happened to start
+    // the app — a build in `dist/`, for example — and that path dies silently
+    // as soon as the copy is moved or rebuilt.
     static func agentExecutablePath() -> String {
-        Bundle.main.executablePath ??
-        "\(INSTALLED_APP_BUNDLE_PATH)/Contents/MacOS/SuperDictate"
+        "\(INSTALLED_APP_BUNDLE_PATH)/Contents/MacOS/Planetka"
+    }
+
+    /// A plist written by an earlier bundle keeps launchd pinned to that path,
+    /// and `bootstrap` silently refuses to replace an already loaded service.
+    private static func launchAgentPointsElsewhere() -> Bool {
+        guard let data = try? Data(contentsOf: launchAgentURL),
+              let plist = try? PropertyListSerialization.propertyList(from: data,
+                                                                     format: nil) as? [String: Any],
+              let program = (plist["ProgramArguments"] as? [String])?.first
+        else { return false }
+        return program != agentExecutablePath()
     }
 
     static func installAndStart() throws {
+        if launchAgentPointsElsewhere() {
+            _ = runLaunchctl(["bootout", launchDomain, launchAgentURL.path])
+        }
         try writeLaunchAgentPlist()
         _ = runLaunchctl(["bootstrap", launchDomain, launchAgentURL.path])
         _ = runLaunchctl(["enable", launchService])
@@ -2381,7 +2427,7 @@ enum SuperDictateAgentService {
         // Neural Engine preparation start over.
         let kick = runLaunchctl(["kickstart", launchService])
         if kick.status != 0 && !isAgentRunning() {
-            throw NSError(domain: "SuperDictateAgentService",
+            throw NSError(domain: "PlanetkaAgentService",
                           code: Int(kick.status),
                           userInfo: [NSLocalizedDescriptionKey: kick.output])
         }
@@ -2431,7 +2477,7 @@ enum SuperDictateAgentService {
                                                 attributes: [.posixPermissions: 0o700])
 
         let logPath = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Logs/SuperDictate-agent.launchd.log").path
+            .appendingPathComponent("Logs/Planetka-agent.launchd.log").path
         let plist: [String: Any] = [
             "Label": AGENT_LABEL,
             "ProgramArguments": [agentExecutablePath(), AGENT_ARGUMENT],
@@ -2473,6 +2519,21 @@ enum SuperDictateAgentService {
         )
     }
 
+    /// The pre-rename agent carries its own label, so launchd would keep it
+    /// running next to this one and both would fight over the same hotkey.
+    static func retireLegacyAgent(label: String = LEGACY_AGENT_LABEL) {
+        let plist = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/\(label).plist")
+        guard FileManager.default.fileExists(atPath: plist.path) else { return }
+        _ = runLaunchctl(["bootout", "\(launchDomain)/\(label)"])
+        do {
+            try FileManager.default.removeItem(at: plist)
+            log("retired the legacy launch agent \(label)")
+        } catch {
+            log("could not remove the legacy launch agent plist: \(error)")
+        }
+    }
+
     private static func runLaunchctl(_ arguments: [String]) -> ProcessRunResult {
         run("/bin/launchctl", arguments)
     }
@@ -2508,7 +2569,7 @@ func privacySafeLogPath(_ url: URL) -> String {
 
 func privacySafeBundlePath(_ path: String) -> String {
     switch path {
-    case "/Applications/SuperDictate.app", "/tmp/SuperDictate-dev.app":
+    case "/Applications/Planetka.app", "/tmp/Planetka-dev.app":
         return path
     default:
         return privacySafeLogPath(path)
@@ -2585,7 +2646,7 @@ extension ISO8601DateFormatter {
 // MARK: - Settings
 //
 // Thin wrapper around the app's standard NSUserDefaults domain, so
-// settings persist at `~/Library/Preferences/com.local.superdictate.plist`.
+// settings persist at `~/Library/Preferences/com.local.planetka.plist`.
 // One property per user-visible setting; defaults are returned inline
 // by each getter when the key is missing, rather than via a central
 // `register()` call.
@@ -2808,7 +2869,7 @@ final class Settings: @unchecked Sendable {
             if let v = defaults.string(forKey: Self.keyTriggerMode), let m = TriggerMode(rawValue: v) {
                 return m
             }
-            return .toggle
+            return .holdOrDoubleTap
         }
         set { defaults.set(newValue.rawValue, forKey: Self.keyTriggerMode) }
     }
@@ -3113,7 +3174,7 @@ final class Settings: @unchecked Sendable {
     /// "Remind me later" pause state, persisted so a relaunch inside
     /// the 24 h window does not re-prompt ~30 s after launch. Both
     /// halves are validated independently and corrupt stored values
-    /// degrade to nil; ParakeyApp treats a missing half as "no pause"
+    /// degrade to nil; PlanetkaApp treats a missing half as "no pause"
     /// and clears the leftover at startup.
     var updateReminderPausedVersion: String? {
         get {
@@ -3490,7 +3551,7 @@ private func speechModelFailureDetail(errorDescription: String) -> String {
         return """
         \(errorDescription)
 
-        Parakey needs a one-time download of the local speech model. Check your network connection and retry; audio is not uploaded.
+        Planetka needs a one-time download of the local speech model. Check your network connection and retry; audio is not uploaded.
         """
     }
     return """
@@ -3587,7 +3648,7 @@ private func audioInputFailureDetail(errorDescription: String) -> String {
     return """
     \(errorDescription)
 
-    Parakey rebuilt the audio engine and retried microphone startup, but CoreAudio is still refusing to start the input unit. If this began after sleep/wake or an audio-device change, restart CoreAudio with sudo killall coreaudiod or reboot the Mac, then retry audio startup.
+    Planetka rebuilt the audio engine and retried microphone startup, but CoreAudio is still refusing to start the input unit. If this began after sleep/wake or an audio-device change, restart CoreAudio with sudo killall coreaudiod or reboot the Mac, then retry audio startup.
     """
 }
 
@@ -3700,7 +3761,7 @@ private func hotkeySetupRowState(isReady: Bool,
                                       buttonTitle: "Retry")
     }
 
-    let verb = triggerMode == .hold ? "Hold" : "Press"
+    let verb = hotkeyTriggerVerb(triggerMode)
     if !isReady {
         return SetupChecklistRowState(detail: "Available after the model, audio input, and permissions are ready.",
                                       status: "Waiting",
@@ -3820,6 +3881,27 @@ private struct HotkeyEventSnapshot: Sendable {
     let keycode: CGKeyCode
     let flagsRawValue: UInt64
     let isAutoRepeat: Bool
+    /// `ProcessInfo.processInfo.systemUptime` at capture. Only
+    /// `.holdOrDoubleTap` consults this (hold-vs-tap timing); every
+    /// other caller — including the ~40 self-test event(...) helpers —
+    /// can omit it and get 0, which never satisfies a real timing
+    /// comparison.
+    let timestamp: TimeInterval
+
+    // Explicit rather than memberwise: a `let` with an inline default is
+    // omitted from the synthesized init, so callers could not pass a real
+    // timestamp at all.
+    init(typeRawValue: UInt32,
+         keycode: CGKeyCode,
+         flagsRawValue: UInt64,
+         isAutoRepeat: Bool,
+         timestamp: TimeInterval = 0) {
+        self.typeRawValue = typeRawValue
+        self.keycode = keycode
+        self.flagsRawValue = flagsRawValue
+        self.isAutoRepeat = isAutoRepeat
+        self.timestamp = timestamp
+    }
 
     var flags: CGEventFlags {
         CGEventFlags(rawValue: flagsRawValue)
@@ -3851,7 +3933,7 @@ private func hotkeyPreferenceUpdateResult(
     guard persisted == recordable else {
         return .rolledBack(
             previous: previous,
-            message: "Parakey could not save that hotkey, so it kept \(previous.name)."
+            message: "Planetka could not save that hotkey, so it kept \(previous.name)."
         )
     }
 
@@ -3960,7 +4042,7 @@ private final class HotkeyRecorderController: NSObject, NSWindowDelegate {
                               action: nil)
         super.init()
 
-        panel.title = "SuperDictate"
+        panel.title = "Planetka"
         panel.isReleasedWhenClosed = false
         panel.level = .floating
         panel.delegate = self
@@ -4228,6 +4310,18 @@ private enum HotkeyTransitionAction: Equatable, Sendable {
 private struct HotkeyTransitionResult: Equatable, Sendable {
     let suppress: Bool
     let actions: [HotkeyTransitionAction]
+    /// `.holdOrDoubleTap` only: a quick tap-release just happened and it's
+    /// still ambiguous (could be the start of a double-tap). The listener
+    /// arms a `HOTKEY_DOUBLE_TAP_WINDOW` timer that calls
+    /// `resolvePendingTap(now:)` — if no second tap resolves it first,
+    /// that confirms the release as a real stop.
+    let armDoubleTapGraceTimer: Bool
+
+    init(suppress: Bool, actions: [HotkeyTransitionAction], armDoubleTapGraceTimer: Bool = false) {
+        self.suppress = suppress
+        self.actions = actions
+        self.armDoubleTapGraceTimer = armDoubleTapGraceTimer
+    }
 
     static let pass = HotkeyTransitionResult(suppress: false, actions: [])
     static let suppressOnly = HotkeyTransitionResult(suppress: true, actions: [])
@@ -4333,6 +4427,9 @@ private struct HotkeyTransitionState {
     private var historyShortcutState = HotkeyShortcutState()
     private var toggleActive = false
     private var suppressEscapeKeyUp = false
+    /// `.holdOrDoubleTap` only — see `HotkeyTransitionResult.armDoubleTapGraceTimer`.
+    private var pendingTapReleaseAt: TimeInterval?
+    private var lastPressAt: TimeInterval?
 
     mutating func resetAll() {
         standardShortcutState.reset()
@@ -4340,10 +4437,27 @@ private struct HotkeyTransitionState {
         historyShortcutState.reset()
         toggleActive = false
         suppressEscapeKeyUp = false
+        pendingTapReleaseAt = nil
+        lastPressAt = nil
     }
 
     mutating func resetToggleState() {
         toggleActive = false
+        pendingTapReleaseAt = nil
+    }
+
+    /// Called by the listener's grace timer once `HOTKEY_DOUBLE_TAP_WINDOW`
+    /// has elapsed since a quick tap-release with no second tap yet. If a
+    /// second tap already resolved it (or none is pending — e.g. a mode
+    /// or hotkey change reset the state first), returns nil and the timer
+    /// is a no-op.
+    mutating func resolvePendingTap(now: TimeInterval) -> HotkeyTransitionAction? {
+        guard let pendingAt = pendingTapReleaseAt,
+              now - pendingAt >= HOTKEY_DOUBLE_TAP_WINDOW - 0.01 else {
+            return nil
+        }
+        pendingTapReleaseAt = nil
+        return .release
     }
 
     /// `canStartRecording` mirrors the app-side guard on handlePress
@@ -4420,6 +4534,63 @@ private struct HotkeyTransitionState {
             }
             toggleActive = true
             return HotkeyTransitionResult(suppress: shortcutResult.suppress, actions: [.press])
+        case .holdOrDoubleTap:
+            guard shortcutResult.edge != .pass else {
+                return shortcutResult.suppress ? .suppressOnly : .pass
+            }
+            switch shortcutResult.edge {
+            case .press:
+                if toggleActive {
+                    // Second confirmed press while hands-free — stop.
+                    toggleActive = false
+                    return HotkeyTransitionResult(suppress: shortcutResult.suppress, actions: [.release])
+                }
+                if let pendingAt = pendingTapReleaseAt,
+                   event.timestamp - pendingAt <= HOTKEY_DOUBLE_TAP_WINDOW {
+                    // Tap #2 arrived in time — this confirms the
+                    // double-tap. Recording never actually stopped
+                    // after tap #1 (see the .release branch below), so
+                    // there's nothing new to start — just latch
+                    // hands-free.
+                    pendingTapReleaseAt = nil
+                    guard canStartRecording else {
+                        return HotkeyTransitionResult(suppress: shortcutResult.suppress,
+                                                      actions: [.rejectedBusyPress])
+                    }
+                    toggleActive = true
+                    return HotkeyTransitionResult(suppress: shortcutResult.suppress, actions: [])
+                }
+                // A fresh press: start immediately, same latency as
+                // hold mode. Whether it turns into a tap or a
+                // deliberate hold is decided on release.
+                pendingTapReleaseAt = nil
+                guard canStartRecording else {
+                    return HotkeyTransitionResult(suppress: shortcutResult.suppress,
+                                                  actions: [.rejectedBusyPress])
+                }
+                lastPressAt = event.timestamp
+                return HotkeyTransitionResult(suppress: shortcutResult.suppress, actions: [.press])
+            case .release:
+                guard !toggleActive else {
+                    // Hands-free already engaged — releases are no-ops.
+                    return shortcutResult.suppress ? .suppressOnly : .pass
+                }
+                let heldFor = lastPressAt.map { event.timestamp - $0 } ?? .infinity
+                if heldFor < HOTKEY_TAP_MAX_HOLD_DURATION {
+                    // Released quickly — might be tap #1 of a
+                    // double-tap. Don't stop yet; the listener arms a
+                    // grace timer that confirms the stop via
+                    // resolvePendingTap(now:) if no second tap follows.
+                    pendingTapReleaseAt = event.timestamp
+                    return HotkeyTransitionResult(suppress: shortcutResult.suppress,
+                                                  actions: [],
+                                                  armDoubleTapGraceTimer: true)
+                }
+                // Held like a deliberate push-to-talk — stop immediately.
+                return HotkeyTransitionResult(suppress: shortcutResult.suppress, actions: [.release])
+            case .suppress, .pass:
+                return shortcutResult.suppress ? .suppressOnly : .pass
+            }
         }
     }
 
@@ -4495,6 +4666,10 @@ final class HotkeyListener {
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var transitionState = HotkeyTransitionState()
+    /// `.holdOrDoubleTap` only — resolves an ambiguous quick tap-release
+    /// as a real stop if no second tap follows in time. See
+    /// `HotkeyTransitionResult.armDoubleTapGraceTimer`.
+    private var doubleTapGraceWorkItem: DispatchWorkItem?
 
     /// User's current hotkey (set via Settings → Hotkey submenu).
     var hotkey: HotkeyChoice = hotkeyChoice(forKeycode: DEFAULT_HOTKEY_KEYCODE)
@@ -4551,7 +4726,8 @@ final class HotkeyListener {
                     typeRawValue: type.rawValue,
                     keycode: CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode)),
                     flagsRawValue: event.flags.rawValue,
-                    isAutoRepeat: type == .keyDown && event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+                    isAutoRepeat: type == .keyDown && event.getIntegerValueField(.keyboardEventAutorepeat) != 0,
+                    timestamp: ProcessInfo.processInfo.systemUptime
                 )
                 let shouldSuppress = MainActor.assumeIsolated {
                     listener.handleTapCallback(snapshot)
@@ -4582,6 +4758,7 @@ final class HotkeyListener {
         }
         tap = nil
         runLoopSource = nil
+        cancelDoubleTapGraceTimer()
         transitionState.resetAll()
     }
 
@@ -4590,6 +4767,7 @@ final class HotkeyListener {
     func setHotkey(_ choice: HotkeyChoice) {
         guard choice != hotkey else { return }
         self.hotkey = choice
+        cancelDoubleTapGraceTimer()
         self.transitionState.resetAll()
         log("HotkeyListener: hotkey changed → \(choice.name)")
     }
@@ -4597,6 +4775,7 @@ final class HotkeyListener {
     func setEnterHotkey(_ choice: HotkeyChoice) {
         guard choice != enterHotkey else { return }
         enterHotkey = choice
+        cancelDoubleTapGraceTimer()
         transitionState.resetAll()
         log("HotkeyListener: alternate completion hotkey changed → \(choice.name)")
     }
@@ -4604,6 +4783,7 @@ final class HotkeyListener {
     func setAlternateCompletionEnabled(_ enabled: Bool) {
         guard enabled != alternateCompletionEnabled else { return }
         alternateCompletionEnabled = enabled
+        cancelDoubleTapGraceTimer()
         transitionState.resetAll()
         log("HotkeyListener: alternate completion → \(enabled ? "enabled" : "disabled")")
     }
@@ -4611,6 +4791,7 @@ final class HotkeyListener {
     func setHistoryHotkey(_ choice: HotkeyChoice) {
         guard choice != historyHotkey else { return }
         historyHotkey = choice
+        cancelDoubleTapGraceTimer()
         transitionState.resetAll()
         log("HotkeyListener: history hotkey changed → \(choice.name)")
     }
@@ -4619,9 +4800,15 @@ final class HotkeyListener {
         guard mode != triggerMode else { return }
         // Reset toggle state when switching modes so we don't get
         // stuck in mid-toggle from a previous session.
+        cancelDoubleTapGraceTimer()
         transitionState.resetToggleState()
         triggerMode = mode
         log("HotkeyListener: trigger mode → \(mode.rawValue)")
+    }
+
+    private func cancelDoubleTapGraceTimer() {
+        doubleTapGraceWorkItem?.cancel()
+        doubleTapGraceWorkItem = nil
     }
 
     private func handleTapCallback(_ event: HotkeyEventSnapshot) -> Bool {
@@ -4643,7 +4830,33 @@ final class HotkeyListener {
                                                 isRecording: isRecordingActive?() ?? false,
                                                 canStartRecording: canStartRecording?() ?? true)
         dispatchHotkeyActions(result.actions)
+        if result.armDoubleTapGraceTimer {
+            armDoubleTapGraceTimer()
+        }
         return result.suppress
+    }
+
+    /// Arms (replacing any previous) grace timer that resolves an
+    /// ambiguous quick tap-release in `.holdOrDoubleTap` mode as a real
+    /// stop, unless a second tap arrives first and resolves it via the
+    /// normal event path instead.
+    private func armDoubleTapGraceTimer() {
+        doubleTapGraceWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                self?.resolveDoubleTapGrace()
+            }
+        }
+        doubleTapGraceWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + HOTKEY_DOUBLE_TAP_WINDOW, execute: workItem)
+    }
+
+    private func resolveDoubleTapGrace() {
+        cancelDoubleTapGraceTimer()
+        guard let action = transitionState.resolvePendingTap(now: ProcessInfo.processInfo.systemUptime) else {
+            return
+        }
+        performHotkeyActions([action], detectedAt: ProcessInfo.processInfo.systemUptime)
     }
 
     private func dispatchHotkeyActions(_ actions: [HotkeyTransitionAction]) {
@@ -4736,7 +4949,7 @@ private enum PendingDictationRecovery {
     private static let magic = Data("SDAR".utf8)
 
     static func directoryURL() throws -> URL {
-        let url = try superDictateApplicationSupportDirectory()
+        let url = try planetkaApplicationSupportDirectory()
             .appendingPathComponent(directoryName, isDirectory: true)
         try FileManager.default.createDirectory(at: url,
                                                 withIntermediateDirectories: true,
@@ -4846,7 +5059,7 @@ private enum PendingDictationRecovery {
 
 private final class PendingDictationJournal: @unchecked Sendable {
     let url: URL
-    private let queue = DispatchQueue(label: "SuperDictate.PendingDictationJournal",
+    private let queue = DispatchQueue(label: "Planetka.PendingDictationJournal",
                                       qos: .utility)
     private var fileDescriptor: Int32
     private var didLogWriteFailure = false
@@ -5199,7 +5412,7 @@ final class AudioCapture: @unchecked Sendable {
         let inputFormat = input.inputFormat(forBus: 0)
         guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
             throw NSError(
-                domain: "SuperDictate.AudioCapture",
+                domain: "Planetka.AudioCapture",
                 code: -2,
                 userInfo: [NSLocalizedDescriptionKey: "The selected microphone has no active audio stream."]
             )
@@ -5211,7 +5424,7 @@ final class AudioCapture: @unchecked Sendable {
             interleaved: false
         ) else {
             throw NSError(
-                domain: "SuperDictate.AudioCapture",
+                domain: "Planetka.AudioCapture",
                 code: -3,
                 userInfo: [NSLocalizedDescriptionKey: "Could not create the transcription audio format."]
             )
@@ -5221,7 +5434,7 @@ final class AudioCapture: @unchecked Sendable {
         let mixToMono = inputFormat.channelCount > 1 && sourceFormat.channelCount == 1
         guard let newConverter = AVAudioConverter(from: sourceFormat, to: targetFormat) else {
             throw NSError(
-                domain: "SuperDictate.AudioCapture",
+                domain: "Planetka.AudioCapture",
                 code: -4,
                 userInfo: [NSLocalizedDescriptionKey: "Could not convert audio from the selected microphone."]
             )
@@ -5459,7 +5672,7 @@ private final class AudioConverterInputProvider: @unchecked Sendable {
 // Actors are reentrant at suspension points: while
 // `await asr.transcribe(...)` is suspended, a second transcribe()
 // call would enter the actor and start concurrent inference. The
-// real guard is ParakeyApp.isBusy, which ensures the app never
+// real guard is PlanetkaApp.isBusy, which ensures the app never
 // issues a second transcribe while one is in flight. The `inFlight`
 // flag below is a cheap defensive backstop should that invariant
 // ever break: it refuses (and, in DEBUG, asserts on) a re-entrant
@@ -5499,6 +5712,34 @@ actor TranscriptionWorker {
     /// Reentrancy backstop — see the comment above. True for the full
     /// duration of transcribe(), including across its await.
     private var inFlight = false
+    /// Lazily loaded on first auto-language dictation. Silero VAD (a few MB)
+    /// downloads once to the FluidAudio model cache — the app already makes
+    /// users wait through the ~460MB Parakeet download, so this rides along
+    /// unnoticed on first use rather than adding a second up-front wait.
+    private var vad: VadManager?
+
+    /// Feeding one continuous buffer that switches between Russian and
+    /// English straight into Parakeet v3 — even across a clean silence gap —
+    /// makes the decoder silently drop one language's audio instead of
+    /// switching (verified empirically, not just theorized). Splitting on
+    /// pauses first and transcribing each speech segment on its own keeps
+    /// `.auto` (nil language) working per segment, which is what actually
+    /// lets a RU/EN dictation session come through correctly.
+    private static let autoSegmentationConfig = VadSegmentationConfig(
+        // ponytail: 0.45s catches a deliberate pause between sentences
+        // without fragmenting mid-sentence breathing gaps; default (0.75s)
+        // let a real inter-language pause slip through as one segment in
+        // testing. Tune against real dictation once users report language
+        // bleed-through.
+        minSilenceDuration: 0.45
+    )
+
+    private func loadedVad() async throws -> VadManager {
+        if let vad { return vad }
+        let created = try await VadManager()
+        vad = created
+        return created
+    }
 
     func load(profile requestedProfile: SpeechModelProfile,
               progressHandler: DownloadUtils.ProgressHandler? = nil) async throws {
@@ -5553,29 +5794,92 @@ actor TranscriptionWorker {
                                language: Language? = nil,
                                requestedAt: TimeInterval) async throws -> TranscriptionWorkerResult {
         let workerEnteredAt = ProcessInfo.processInfo.systemUptime
-        guard let engine else { throw NSError(domain: "Parakey", code: -2) }
+        guard let engine else { throw NSError(domain: "Planetka", code: -2) }
         guard !inFlight else {
-            log("ASR: transcribe re-entered while another transcription is in flight — refusing (ParakeyApp.isBusy should make this impossible)")
+            log("ASR: transcribe re-entered while another transcription is in flight — refusing (PlanetkaApp.isBusy should make this impossible)")
             assertionFailure("TranscriptionWorker.transcribe re-entered across a suspension point")
-            throw NSError(domain: "Parakey", code: -3)
+            throw NSError(domain: "Planetka", code: -3)
         }
         inFlight = true
         defer { inFlight = false }
         switch engine {
         case .parakeetV3(let asr):
-            let decoderPreparationStartedAt = ProcessInfo.processInfo.systemUptime
-            var state = try TdtDecoderState()
-            let fluidCallStartedAt = ProcessInfo.processInfo.systemUptime
-            let result = try await asr.transcribe(samples, decoderState: &state, language: language)
-            let fluidCallCompletedAt = ProcessInfo.processInfo.systemUptime
+            // Only auto-detect (no forced language) benefits from
+            // segmentation — a user who explicitly picked a language wants
+            // that language applied to the whole clip, and forcing one
+            // script over a multi-segment split would just reintroduce the
+            // bleed-through this exists to avoid.
+            guard language == nil else {
+                return try await transcribeSingleShot(samples: samples,
+                                                      language: language,
+                                                      asr: asr,
+                                                      workerEnteredAt: workerEnteredAt,
+                                                      requestedAt: requestedAt)
+            }
+
+            let segmentationStartedAt = ProcessInfo.processInfo.systemUptime
+            var segments: [[Float]]?
+            do {
+                segments = try await loadedVad().segmentSpeechAudio(samples, config: Self.autoSegmentationConfig)
+            } catch {
+                // VAD is an enhancement over the single-shot path, not a
+                // dependency dictation can fail on — e.g. no network for the
+                // first-ever Silero model download. Fall through and
+                // transcribe the whole clip as before.
+                log("ASR: VAD segmentation unavailable, falling back to single-shot transcribe: \(error.localizedDescription)")
+                segments = nil
+            }
+            guard let segments, segments.count > 1 else {
+                // No VAD, or the clip is one contiguous thought — the
+                // single-shot path already handles that correctly.
+                return try await transcribeSingleShot(samples: samples,
+                                                      language: language,
+                                                      asr: asr,
+                                                      workerEnteredAt: workerEnteredAt,
+                                                      requestedAt: requestedAt)
+            }
+            let segmentationSeconds = ProcessInfo.processInfo.systemUptime - segmentationStartedAt
+
+            var texts: [String] = []
+            var fluidCallSeconds: Double = 0
+            var fluidProcessingSeconds: Double = 0
+            for segment in segments {
+                var state = try TdtDecoderState()
+                let fluidCallStartedAt = ProcessInfo.processInfo.systemUptime
+                let result = try await asr.transcribe(segment, decoderState: &state, language: nil)
+                fluidCallSeconds += ProcessInfo.processInfo.systemUptime - fluidCallStartedAt
+                fluidProcessingSeconds += result.processingTime
+                if !result.text.isEmpty {
+                    texts.append(result.text)
+                }
+            }
             return TranscriptionWorkerResult(
-                text: result.text,
+                text: texts.joined(separator: " "),
                 workerQueueSeconds: workerEnteredAt - requestedAt,
-                decoderPreparationSeconds: fluidCallStartedAt - decoderPreparationStartedAt,
-                fluidCallSeconds: fluidCallCompletedAt - fluidCallStartedAt,
-                fluidProcessingSeconds: result.processingTime
+                decoderPreparationSeconds: segmentationSeconds,
+                fluidCallSeconds: fluidCallSeconds,
+                fluidProcessingSeconds: fluidProcessingSeconds
             )
         }
+    }
+
+    private func transcribeSingleShot(samples: [Float],
+                                      language: Language?,
+                                      asr: AsrManager,
+                                      workerEnteredAt: TimeInterval,
+                                      requestedAt: TimeInterval) async throws -> TranscriptionWorkerResult {
+        let decoderPreparationStartedAt = ProcessInfo.processInfo.systemUptime
+        var state = try TdtDecoderState()
+        let fluidCallStartedAt = ProcessInfo.processInfo.systemUptime
+        let result = try await asr.transcribe(samples, decoderState: &state, language: language)
+        let fluidCallCompletedAt = ProcessInfo.processInfo.systemUptime
+        return TranscriptionWorkerResult(
+            text: result.text,
+            workerQueueSeconds: workerEnteredAt - requestedAt,
+            decoderPreparationSeconds: fluidCallStartedAt - decoderPreparationStartedAt,
+            fluidCallSeconds: fluidCallCompletedAt - fluidCallStartedAt,
+            fluidProcessingSeconds: result.processingTime
+        )
     }
 
     func warmUp() async throws -> ASRTimingBreakdown {
@@ -6276,7 +6580,7 @@ enum AIKeyStore {
         }
     }
 
-    private static let service = "com.local.superdictate.ai"
+    private static let service = "com.local.planetka.ai"
     private static let account = "api-key"
 
     private static var baseQuery: [String: Any] {
@@ -6299,6 +6603,31 @@ enum AIKeyStore {
             return nil
         }
         return key
+    }
+
+    /// The API key is stored under the bundle identifier, so a rename would
+    /// look like the user simply lost their key.
+    static func adoptLegacyKey(from legacyService: String = LEGACY_AI_KEYCHAIN_SERVICE) {
+        guard read() == nil else { return }
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: legacyService,
+            kSecAttrAccount as String: account,
+        ]
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+              let data = item as? Data,
+              let key = String(data: data, encoding: .utf8),
+              !key.isEmpty
+        else { return }
+        do {
+            try write(key)
+            log("migrated the AI cleanup key from \(legacyService)")
+        } catch {
+            log("could not migrate the AI cleanup key: \(error)")
+        }
     }
 
     static func write(_ key: String) throws {
@@ -7656,7 +7985,7 @@ enum SystemAudio {
     // thread (this serial queue or, for the launch-time sync calls,
     // the main thread), which satisfies NSAppleScript's
     // not-thread-safe contract.
-    private static let queue = DispatchQueue(label: "ParakeySystemAudio", qos: .userInitiated)
+    private static let queue = DispatchQueue(label: "PlanetkaSystemAudio", qos: .userInitiated)
 
     /// nil = the query itself failed, as opposed to a definitive
     /// muted/unmuted answer.
@@ -7958,7 +8287,7 @@ private func diagnosticBulletLines(_ lines: [String], emptyText: String) -> Stri
 
 func diagnosticsReportText(from snapshot: DiagnosticsReportSnapshot) -> String {
     """
-    Parakey diagnostics
+    Planetka diagnostics
     Generated: \(snapshot.generated)
     App version: \(snapshot.appVersion) (\(snapshot.appBuild))
     macOS: \(snapshot.macOS)
@@ -8144,18 +8473,18 @@ enum UpdateCheckFailure: Error, Equatable, Sendable {
 func manualUpdateCheckFailureText(_ failure: UpdateCheckFailure) -> String {
     switch failure {
     case .network:
-        return "SuperDictate couldn't reach GitHub. Check your internet connection and try again."
+        return "Planetka couldn't reach GitHub. Check your internet connection and try again."
     case .httpStatus(403):
         return "GitHub declined the update check (HTTP 403). This is usually temporary rate limiting — try again in a few minutes."
     case .httpStatus(let code):
         return "GitHub returned an error (HTTP \(code)). Try again later."
     case .unexpectedResponse:
-        return "GitHub returned a response SuperDictate couldn't read. Try again later, or check the releases page on GitHub directly."
+        return "GitHub returned a response Planetka couldn't read. Try again later, or check the releases page on GitHub directly."
     }
 }
 
 enum UpdateCheck {
-    private static let githubReleaseURLPathPrefix = "/shlgd/SuperDictate/releases/tag/"
+    private static let githubReleaseURLPathPrefix = "/Aliwers/Planetka/releases/tag/"
     static let maxReleaseResponseBytes = 512 * 1024
 
     static func fetchLatest() async -> Result<GitHubRelease, UpdateCheckFailure> {
@@ -8164,7 +8493,7 @@ enum UpdateCheck {
         // The privacy docs promise exactly this fixed token — no
         // version, device, or user identifiers. Must stay in sync with
         // docs/privacy/network-calls.json.
-        req.setValue("superdictate-update-check", forHTTPHeaderField: "User-Agent")
+        req.setValue("planetka-update-check", forHTTPHeaderField: "User-Agent")
         req.timeoutInterval = 10
         let config = URLSessionConfiguration.ephemeral
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
@@ -8243,18 +8572,18 @@ enum UpdateCheck {
     }
 }
 
-struct SuperDictateUpdateManifest: Decodable, Equatable, Sendable {
+struct PlanetkaUpdateManifest: Decodable, Equatable, Sendable {
     let version: String
     let sha256: String
 }
 
-struct PreparedSuperDictateUpdate: Sendable {
+struct PreparedPlanetkaUpdate: Sendable {
     let version: String
     let workDirectory: URL
     let stagedAppURL: URL
 }
 
-enum SuperDictateUpdateInstallerError: LocalizedError, Equatable, Sendable {
+enum PlanetkaUpdateInstallerError: LocalizedError, Equatable, Sendable {
     case network
     case httpStatus(Int)
     case invalidManifest
@@ -8287,7 +8616,7 @@ enum SuperDictateUpdateInstallerError: LocalizedError, Equatable, Sendable {
             case .invalidBundle(let detail):
                 return "The new application failed verification: \(detail)"
             case .appNotWritable:
-                return "SuperDictate cannot replace the application in Applications. Run the regular installer once."
+                return "Planetka cannot replace the application in Applications. Run the regular installer once."
             }
         }
         switch self {
@@ -8308,36 +8637,36 @@ enum SuperDictateUpdateInstallerError: LocalizedError, Equatable, Sendable {
         case .invalidBundle(let detail):
             return "Проверка нового приложения не пройдена: \(detail)"
         case .appNotWritable:
-            return "SuperDictate не может заменить приложение в папке Applications. Запустите обычный установщик один раз."
+            return "Planetka не может заменить приложение в папке Applications. Запустите обычный установщик один раз."
         }
     }
 }
 
-enum SuperDictateUpdateInstaller {
+enum PlanetkaUpdateInstaller {
     private static let manifestMaxBytes = 16 * 1024
 
-    static func fetchManifest(expectedVersion: String) async throws -> SuperDictateUpdateManifest {
+    static func fetchManifest(expectedVersion: String) async throws -> PlanetkaUpdateManifest {
         var request = URLRequest(url: GITHUB_UPDATE_MANIFEST_URL)
-        request.setValue("superdictate-in-app-update", forHTTPHeaderField: "User-Agent")
+        request.setValue("planetka-in-app-update", forHTTPHeaderField: "User-Agent")
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
         request.timeoutInterval = 15
         let (data, response) = try await fetch(request: request, maxBytes: manifestMaxBytes)
         guard (200..<300).contains(response.statusCode) else {
-            throw SuperDictateUpdateInstallerError.httpStatus(response.statusCode)
+            throw PlanetkaUpdateInstallerError.httpStatus(response.statusCode)
         }
         return try parseManifest(data, expectedVersion: expectedVersion)
     }
 
     static func parseManifest(_ data: Data,
-                              expectedVersion: String) throws -> SuperDictateUpdateManifest {
-        guard let manifest = try? JSONDecoder().decode(SuperDictateUpdateManifest.self, from: data),
+                              expectedVersion: String) throws -> PlanetkaUpdateManifest {
+        guard let manifest = try? JSONDecoder().decode(PlanetkaUpdateManifest.self, from: data),
               UpdateCheck.normalizedReleaseVersion(from: manifest.version) == manifest.version,
               manifest.sha256.count == 64,
               manifest.sha256.allSatisfy({ $0.isHexDigit }) else {
-            throw SuperDictateUpdateInstallerError.invalidManifest
+            throw PlanetkaUpdateInstallerError.invalidManifest
         }
         guard manifest.version == expectedVersion else {
-            throw SuperDictateUpdateInstallerError.manifestVersionMismatch(
+            throw PlanetkaUpdateInstallerError.manifestVersionMismatch(
                 expected: expectedVersion,
                 actual: manifest.version
             )
@@ -8345,31 +8674,31 @@ enum SuperDictateUpdateInstaller {
         return manifest
     }
 
-    static func prepare(manifest: SuperDictateUpdateManifest) async throws -> PreparedSuperDictateUpdate {
+    static func prepare(manifest: PlanetkaUpdateManifest) async throws -> PreparedPlanetkaUpdate {
         guard appCanBeReplaced(at: Bundle.main.bundleURL) else {
-            throw SuperDictateUpdateInstallerError.appNotWritable
+            throw PlanetkaUpdateInstallerError.appNotWritable
         }
 
-        let archiveURL = URL(string: "https://github.com/shlgd/SuperDictate/releases/download/v\(manifest.version)/SuperDictate.zip")!
+        let archiveURL = URL(string: "https://github.com/Aliwers/Planetka/releases/download/v\(manifest.version)/Planetka.zip")!
         var request = URLRequest(url: archiveURL)
-        request.setValue("superdictate-in-app-update", forHTTPHeaderField: "User-Agent")
+        request.setValue("planetka-in-app-update", forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 60
         let (archiveData, response) = try await fetch(request: request,
                                                       maxBytes: UPDATE_ARCHIVE_MAX_BYTES)
         guard (200..<300).contains(response.statusCode) else {
-            throw SuperDictateUpdateInstallerError.httpStatus(response.statusCode)
+            throw PlanetkaUpdateInstallerError.httpStatus(response.statusCode)
         }
 
         var hasher = SHA256()
         hasher.update(data: archiveData)
         let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
         guard digest.caseInsensitiveCompare(manifest.sha256) == .orderedSame else {
-            throw SuperDictateUpdateInstallerError.checksumMismatch
+            throw PlanetkaUpdateInstallerError.checksumMismatch
         }
 
         let workDirectory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("SuperDictate-update-\(UUID().uuidString)", isDirectory: true)
-        let archiveFile = workDirectory.appendingPathComponent("SuperDictate.zip")
+            .appendingPathComponent("Planetka-update-\(UUID().uuidString)", isDirectory: true)
+        let archiveFile = workDirectory.appendingPathComponent("Planetka.zip")
         let extractedDirectory = workDirectory.appendingPathComponent("release", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: extractedDirectory,
@@ -8378,30 +8707,30 @@ enum SuperDictateUpdateInstaller {
             try archiveData.write(to: archiveFile, options: [.atomic])
         } catch {
             try? FileManager.default.removeItem(at: workDirectory)
-            throw SuperDictateUpdateInstallerError.extractionFailed(error.localizedDescription)
+            throw PlanetkaUpdateInstallerError.extractionFailed(error.localizedDescription)
         }
 
         let extraction = await Task.detached(priority: .userInitiated) {
-            SuperDictateAgentService.run("/usr/bin/ditto",
+            PlanetkaAgentService.run("/usr/bin/ditto",
                                          ["-x", "-k", archiveFile.path, extractedDirectory.path])
         }.value
         guard extraction.status == 0 else {
             try? FileManager.default.removeItem(at: workDirectory)
-            throw SuperDictateUpdateInstallerError.extractionFailed(extraction.output)
+            throw PlanetkaUpdateInstallerError.extractionFailed(extraction.output)
         }
 
-        let stagedAppURL = extractedDirectory.appendingPathComponent("SuperDictate.app",
+        let stagedAppURL = extractedDirectory.appendingPathComponent("Planetka.app",
                                                                       isDirectory: true)
         do {
             try validateApp(at: stagedAppURL, expectedVersion: manifest.version)
-        } catch let error as SuperDictateUpdateInstallerError {
+        } catch let error as PlanetkaUpdateInstallerError {
             try? FileManager.default.removeItem(at: workDirectory)
             throw error
         } catch {
             try? FileManager.default.removeItem(at: workDirectory)
-            throw SuperDictateUpdateInstallerError.invalidBundle(error.localizedDescription)
+            throw PlanetkaUpdateInstallerError.invalidBundle(error.localizedDescription)
         }
-        return PreparedSuperDictateUpdate(version: manifest.version,
+        return PreparedPlanetkaUpdate(version: manifest.version,
                                           workDirectory: workDirectory,
                                           stagedAppURL: stagedAppURL)
     }
@@ -8417,16 +8746,16 @@ enum SuperDictateUpdateInstaller {
     static func validateApp(at appURL: URL, expectedVersion: String) throws {
         let fileManager = FileManager.default
         let infoURL = appURL.appendingPathComponent("Contents/Info.plist")
-        let executableURL = appURL.appendingPathComponent("Contents/MacOS/SuperDictate")
-        guard appURL.lastPathComponent == "SuperDictate.app",
+        let executableURL = appURL.appendingPathComponent("Contents/MacOS/Planetka")
+        guard appURL.lastPathComponent == "Planetka.app",
               fileManager.fileExists(atPath: infoURL.path),
               fileManager.isExecutableFile(atPath: executableURL.path),
               let infoData = try? Data(contentsOf: infoURL),
               let info = try? PropertyListSerialization.propertyList(from: infoData,
                                                                      format: nil) as? [String: Any],
-              info["CFBundleIdentifier"] as? String == "com.local.superdictate",
+              info["CFBundleIdentifier"] as? String == "com.local.planetka",
               info["CFBundleShortVersionString"] as? String == expectedVersion else {
-            throw SuperDictateUpdateInstallerError.invalidBundle("неверный идентификатор или версия")
+            throw PlanetkaUpdateInstallerError.invalidBundle("неверный идентификатор или версия")
         }
 
         if let enumerator = fileManager.enumerator(at: appURL,
@@ -8434,15 +8763,15 @@ enum SuperDictateUpdateInstaller {
                                                    options: []) {
             for case let itemURL as URL in enumerator {
                 if (try? itemURL.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true {
-                    throw SuperDictateUpdateInstallerError.invalidBundle("архив содержит символическую ссылку")
+                    throw PlanetkaUpdateInstallerError.invalidBundle("архив содержит символическую ссылку")
                 }
             }
         }
 
-        let signature = SuperDictateAgentService.run("/usr/bin/codesign",
+        let signature = PlanetkaAgentService.run("/usr/bin/codesign",
                                                       ["--verify", "--deep", "--strict", appURL.path])
         guard signature.status == 0 else {
-            throw SuperDictateUpdateInstallerError.invalidBundle("codesign: \(signature.output)")
+            throw PlanetkaUpdateInstallerError.invalidBundle("codesign: \(signature.output)")
         }
     }
 
@@ -8458,16 +8787,16 @@ enum SuperDictateUpdateInstaller {
         do {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
-                throw SuperDictateUpdateInstallerError.network
+                throw PlanetkaUpdateInstallerError.network
             }
             guard data.count <= maxBytes else {
-                throw SuperDictateUpdateInstallerError.archiveTooLarge
+                throw PlanetkaUpdateInstallerError.archiveTooLarge
             }
             return (data, http)
-        } catch let error as SuperDictateUpdateInstallerError {
+        } catch let error as PlanetkaUpdateInstallerError {
             throw error
         } catch {
-            throw SuperDictateUpdateInstallerError.network
+            throw PlanetkaUpdateInstallerError.network
         }
     }
 }
@@ -8535,7 +8864,7 @@ func updateHelperScript(pid: pid_t,
     STATE_PATH=\#(shellSingleQuoted(statePath))
     APP_PATH=\#(shellSingleQuoted(appPath))
     RELEASES_PAGE=\#(shellSingleQuoted(releasesPageURL))
-    PARAKEY_PID=\#(pid)
+    PLANETKA_PID=\#(pid)
     CASK_TAP=\#(shellSingleQuoted(HOMEBREW_CASK_TAP))
     CASK_TOKEN=\#(shellSingleQuoted(HOMEBREW_CASK_TOKEN))
     CASK_INSTALLED_TOKEN=\#(shellSingleQuoted(HOMEBREW_CASK_INSTALLED_TOKEN))
@@ -8606,24 +8935,24 @@ func updateHelperScript(pid: pid_t,
         "$BREW" "$@"
     }
 
-    wait_for_parakey_exit() {
+    wait_for_planetka_exit() {
         for _ in {1..60}; do
-            if ! kill -0 "$PARAKEY_PID" 2>/dev/null; then
+            if ! kill -0 "$PLANETKA_PID" 2>/dev/null; then
                 return 0
             fi
             sleep 0.5
         done
 
-        log "Parakey was still running after 30s; sending TERM before updating."
-        kill -TERM "$PARAKEY_PID" 2>/dev/null || true
+        log "Planetka was still running after 30s; sending TERM before updating."
+        kill -TERM "$PLANETKA_PID" 2>/dev/null || true
         for _ in {1..20}; do
-            if ! kill -0 "$PARAKEY_PID" 2>/dev/null; then
+            if ! kill -0 "$PLANETKA_PID" 2>/dev/null; then
                 return 0
             fi
             sleep 0.5
         done
 
-        fail "Parakey did not quit, so the app bundle was not touched."
+        fail "Planetka did not quit, so the app bundle was not touched."
     }
 
     installed_target_version() {
@@ -8634,7 +8963,7 @@ func updateHelperScript(pid: pid_t,
     }
 
     {
-        echo "[$(timestamp)] Parakey update starting"
+        echo "[$(timestamp)] Planetka update starting"
         echo "Target version: $TARGET_VERSION"
         echo "Current installed version: $(app_version)"
         echo "Brew: $BREW"
@@ -8644,7 +8973,7 @@ func updateHelperScript(pid: pid_t,
         echo "App: $APP_PATH"
     }
 
-    state "preparing" "Preparing Homebrew for Parakey v$TARGET_VERSION..."
+    state "preparing" "Preparing Homebrew for Planetka v$TARGET_VERSION..."
 
     if ! run_brew tap "$CASK_TAP"; then
         fail "brew tap failed; leaving the existing app in place."
@@ -8655,13 +8984,13 @@ func updateHelperScript(pid: pid_t,
         fail "brew update failed; leaving the existing app in place."
     fi
 
-    state "downloading" "Downloading Parakey v$TARGET_VERSION..."
+    state "downloading" "Downloading Planetka v$TARGET_VERSION..."
     if ! run_brew fetch --cask --force "$CASK_TOKEN"; then
         fail "brew cask fetch failed; leaving the existing app in place."
     fi
 
-    state "installing" "Installing Parakey v$TARGET_VERSION..."
-    wait_for_parakey_exit
+    state "installing" "Installing Planetka v$TARGET_VERSION..."
+    wait_for_planetka_exit
 
     if ! run_brew upgrade --cask --force --appdir="$APP_DIR" "$CASK_TOKEN"; then
         fail "brew cask upgrade failed; leaving the existing app in place."
@@ -8670,7 +8999,7 @@ func updateHelperScript(pid: pid_t,
     state "verifying" "Verifying the installed app..."
     if ! installed_target_version; then
         log "brew upgrade completed without installing v$TARGET_VERSION; forcing qualified cask reinstall."
-        state "installing" "Reinstalling Parakey v$TARGET_VERSION..."
+        state "installing" "Reinstalling Planetka v$TARGET_VERSION..."
         if ! run_brew update --force; then
             fail "brew update failed before reinstall; leaving the existing app in place."
         fi
@@ -8680,17 +9009,17 @@ func updateHelperScript(pid: pid_t,
     fi
 
     if ! installed_target_version; then
-        fail "Expected Parakey v$TARGET_VERSION or newer after update, but the installed app is still $(app_version)."
+        fail "Expected Planetka v$TARGET_VERSION or newer after update, but the installed app is still $(app_version)."
     fi
 
-    state "relaunching" "Update complete. Reopening Parakey..."
+    state "relaunching" "Update complete. Reopening Planetka..."
     sleep 2
     /usr/bin/open "$APP_PATH"
-    state "complete" "Parakey v$TARGET_VERSION is installed."
+    state "complete" "Planetka v$TARGET_VERSION is installed."
     """#
 }
 
-func superDictateDirectUpdateHelperScript(pid: pid_t,
+func planetkaDirectUpdateHelperScript(pid: pid_t,
                                            targetVersion: String,
                                            statePath: String,
                                            stagedAppPath: String,
@@ -8703,17 +9032,17 @@ func superDictateDirectUpdateHelperScript(pid: pid_t,
     let preparing = localizedText("Подготавливаю замену приложения…",
                                   "Preparing to replace the application…",
                                   language: language)
-    let installing = localizedText("Устанавливаю SuperDictate v\(targetVersion)…",
-                                    "Installing SuperDictate v\(targetVersion)…",
+    let installing = localizedText("Устанавливаю Planetka v\(targetVersion)…",
+                                    "Installing Planetka v\(targetVersion)…",
                                     language: language)
     let verifying = localizedText("Проверяю установленную версию…",
                                    "Verifying the installed version…",
                                    language: language)
-    let relaunching = localizedText("Обновление готово. Запускаю SuperDictate…",
-                                    "Update complete. Reopening SuperDictate…",
+    let relaunching = localizedText("Обновление готово. Запускаю Planetka…",
+                                    "Update complete. Reopening Planetka…",
                                     language: language)
-    let complete = localizedText("SuperDictate v\(targetVersion) установлена.",
-                                  "SuperDictate v\(targetVersion) is installed.",
+    let complete = localizedText("Planetka v\(targetVersion) установлена.",
+                                  "Planetka v\(targetVersion) is installed.",
                                   language: language)
     let failed = localizedText("Обновление не установлено. Предыдущая версия восстановлена.",
                                 "The update was not installed. The previous version was restored.",
@@ -8778,8 +9107,8 @@ func superDictateDirectUpdateHelperScript(pid: pid_t,
     }
 
     verify_app() {
-        [ -x "$APP_PATH/Contents/MacOS/SuperDictate" ] || return 1
-        [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INFO_PLIST" 2>/dev/null)" = "com.local.superdictate" ] || return 1
+        [ -x "$APP_PATH/Contents/MacOS/Planetka" ] || return 1
+        [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INFO_PLIST" 2>/dev/null)" = "com.local.planetka" ] || return 1
         [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO_PLIST" 2>/dev/null)" = "$TARGET_VERSION" ] || return 1
         /usr/bin/codesign --verify --deep --strict "$APP_PATH"
     }
@@ -8805,7 +9134,7 @@ func superDictateDirectUpdateHelperScript(pid: pid_t,
     wait_for_panel_exit || rollback
 
     /bin/launchctl bootout "$SERVICE" >/dev/null 2>&1 || true
-    /usr/bin/pkill -f "$APP_PATH/Contents/MacOS/SuperDictate --agent" >/dev/null 2>&1 || true
+    /usr/bin/pkill -f "$APP_PATH/Contents/MacOS/Planetka --agent" >/dev/null 2>&1 || true
 
     state "installing" \#(shellSingleQuoted(installing))
     /bin/mv "$APP_PATH" "$BACKUP_APP" || rollback
@@ -8828,7 +9157,7 @@ private func writePrivateUpdateHelperScript(_ script: String,
                                             directory: String = NSTemporaryDirectory(),
                                             fileName: String? = nil) throws -> String {
     guard !directory.isEmpty else { throw posixError(EINVAL) }
-    let leafName = fileName ?? "parakey-update-\(UUID().uuidString).sh"
+    let leafName = fileName ?? "planetka-update-\(UUID().uuidString).sh"
     guard !leafName.isEmpty,
           (leafName as NSString).lastPathComponent == leafName else {
         throw posixError(EINVAL)
@@ -8877,7 +9206,7 @@ private func openPrivateUpdateHelperLog(preferredPath: String = UPDATE_HELPER_LO
                                  handle: FileHandle(fileDescriptor: fd, closeOnDealloc: true))
     } catch {
         let fallbackPath = (fallbackDirectory as NSString)
-            .appendingPathComponent("parakey-update-\(UUID().uuidString).log")
+            .appendingPathComponent("planetka-update-\(UUID().uuidString).log")
         let fd = try openPrivateOutputFileDescriptor(atPath: fallbackPath,
                                                      exclusive: true,
                                                      removeOnFailure: true)
@@ -8956,7 +9285,7 @@ private func openPrivateOutputFileDescriptor(atPath path: String,
 // Single class that owns the lifecycle and the AppKit menu-bar UI.
 // All UI state lives here; subsystems (HotkeyListener, AudioCapture,
 // TranscriptionWorker, UpdateCheck, …) hold their own state but
-// call back into `ParakeyApp` for anything that touches the menu.
+// call back into `PlanetkaApp` for anything that touches the menu.
 
 private enum DictationReleaseShortcut: Equatable {
     case standard
@@ -9432,7 +9761,7 @@ private func exportRecordingHUDAnimationFrames(to directory: URL) throws {
                                                 bytesPerRow: 0,
                                                 bitsPerPixel: 0),
                   let context = NSGraphicsContext(bitmapImageRep: bitmap) else {
-                throw NSError(domain: "SuperDictateHUDExport", code: 1,
+                throw NSError(domain: "PlanetkaHUDExport", code: 1,
                               userInfo: [NSLocalizedDescriptionKey: "Could not create an RGBA frame."])
             }
             bitmap.size = pointSize
@@ -9445,7 +9774,7 @@ private func exportRecordingHUDAnimationFrames(to directory: URL) throws {
             NSGraphicsContext.restoreGraphicsState()
 
             guard let png = bitmap.representation(using: .png, properties: [:]) else {
-                throw NSError(domain: "SuperDictateHUDExport", code: 2,
+                throw NSError(domain: "PlanetkaHUDExport", code: 2,
                               userInfo: [NSLocalizedDescriptionKey: "Could not encode a PNG frame."])
             }
             let name = String(format: "frame-%05d.png", frameIndex)
@@ -9558,7 +9887,7 @@ private final class UpdateProgressAppDelegate: NSObject, NSApplicationDelegate, 
                               styleMask: [.titled, .closable],
                               backing: .buffered,
                               defer: false)
-        window.title = t("Обновление SuperDictate", "Updating SuperDictate")
+        window.title = t("Обновление Planetka", "Updating Planetka")
         window.isReleasedWhenClosed = false
         window.delegate = self
         self.window = window
@@ -9570,13 +9899,13 @@ private final class UpdateProgressAppDelegate: NSObject, NSApplicationDelegate, 
         root.edgeInsets = NSEdgeInsets(top: 18, left: 20, bottom: 16, right: 20)
         root.translatesAutoresizingMaskIntoConstraints = false
 
-        let title = updateProgressLabel(t("Обновление SuperDictate до v\(launch.targetVersion)",
-                                          "Updating SuperDictate to v\(launch.targetVersion)"),
+        let title = updateProgressLabel(t("Обновление Planetka до v\(launch.targetVersion)",
+                                          "Updating Planetka to v\(launch.targetVersion)"),
                                         font: .systemFont(ofSize: 18, weight: .semibold))
         messageLabel = updateProgressLabel(t("Запускаю обновление…", "Starting update…"),
                                            font: .systemFont(ofSize: 13, weight: .medium))
-        detailLabel = updateProgressLabel(t("SuperDictate автоматически откроется после установки.",
-                                             "SuperDictate will reopen automatically when the update finishes."),
+        detailLabel = updateProgressLabel(t("Planetka автоматически откроется после установки.",
+                                             "Planetka will reopen automatically when the update finishes."),
                                           font: .systemFont(ofSize: 12),
                                           color: .secondaryLabelColor)
         detailLabel.preferredMaxLayoutWidth = 390
@@ -9689,12 +10018,12 @@ private final class UpdateProgressAppDelegate: NSObject, NSApplicationDelegate, 
             detailLabel.stringValue = t("Старая версия закрыта, новая устанавливается. Приложение откроется автоматически.",
                                         "The old version has closed while the new one is installed. It will reopen automatically.")
         case "relaunching":
-            detailLabel.stringValue = t("Запускаю новую версию SuperDictate.",
-                                        "Opening the new version of SuperDictate.")
+            detailLabel.stringValue = t("Запускаю новую версию Planetka.",
+                                        "Opening the new version of Planetka.")
             scheduleClose(after: 0.5)
         default:
-            detailLabel.stringValue = t("SuperDictate автоматически откроется после установки.",
-                                        "SuperDictate will reopen automatically when the update finishes.")
+            detailLabel.stringValue = t("Planetka автоматически откроется после установки.",
+                                        "Planetka will reopen automatically when the update finishes.")
         }
     }
 
@@ -10432,7 +10761,7 @@ private final class DictationSpeechTimeChartView: NSView {
 }
 
 @MainActor
-final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class PlanetkaApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private struct CachedInsertionTarget {
         let target: FocusedInsertionTargetFrame
         let windowFrame: NSRect?
@@ -10593,7 +10922,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// `correctionSyncScanInFlight` (main-actor) guarantees scans
     /// never overlap; results hop back to the main actor, where the
     /// existing merge/apply logic runs unchanged.
-    private static let correctionSyncScanQueue = DispatchQueue(label: "ParakeyCorrectionSyncScan",
+    private static let correctionSyncScanQueue = DispatchQueue(label: "PlanetkaCorrectionSyncScan",
                                                                qos: .utility)
     private var correctionSyncScanInFlight = false
     /// Scan request that arrived while a scan was in flight; re-issued
@@ -10740,7 +11069,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func openControlPanelFromAgent() {
-        if SuperDictateControlPanelRegistry.activateExistingPanelIfPresent() {
+        if PlanetkaControlPanelRegistry.activateExistingPanelIfPresent() {
             log("control panel activated from agent")
             return
         }
@@ -10914,7 +11243,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             recordStartupFailure(
                 stage: .hotkeyListener,
                 error: NSError(
-                    domain: "SuperDictate",
+                    domain: "Planetka",
                     code: -6,
                     userInfo: [NSLocalizedDescriptionKey: "The hotkey listener could not resume after shortcut capture."]
                 ),
@@ -10994,7 +11323,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let normalizedTempRoot = tempRoot.hasSuffix("/") ? tempRoot : "\(tempRoot)/"
 
         guard url.lastPathComponent == CORRECTIONS_FILE_NAME,
-              folder.lastPathComponent.hasPrefix("Parakey-"),
+              folder.lastPathComponent.hasPrefix("Planetka-"),
               folder.path.hasPrefix(normalizedTempRoot)
         else {
             log("correction share cleanup skipped (\(reason)): unexpected temp file")
@@ -11586,7 +11915,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // finds it under that path automatically; Bundle.module is
         // deliberately not used here so codesign --deep doesn't have
         // to grapple with a SwiftPM resource bundle.
-        let image = NSImage(named: "parakey-menubar")
+        let image = NSImage(named: "planetka-menubar")
         image?.isTemplate = true
         image?.size = NSSize(width: 18, height: 18)
         templateImage = image
@@ -11595,10 +11924,10 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         button.image = image
         button.imagePosition = .imageOnly
         if image == nil {
-            button.title = "Parakey"
-            log("statusItem: parakey-menubar.png not in Bundle.main — text fallback")
+            button.title = "Planetka"
+            log("statusItem: planetka-menubar.png not in Bundle.main — text fallback")
         }
-        button.toolTip = "Parakey"
+        button.toolTip = "Planetka"
     }
 
     private func concealMenuBarIcon() {
@@ -12942,7 +13271,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         proc.arguments = [
             "-c",
             systemAudioMuteWatchdogScript(),
-            "parakey-audio-watchdog",
+            "planetka-audio-watchdog",
             "\(getpid())",
             systemAudioMuteMarkerURL().path,
         ]
@@ -13705,8 +14034,8 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func confirmStopDictation() -> Bool {
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Stop SuperDictate?"
-        alert.informativeText = "The \(hotkey.hotkey.name) dictation shortcut will stop until you open SuperDictate again. Use Close to hide windows while keeping dictation running."
+        alert.messageText = "Stop Planetka?"
+        alert.informativeText = "The \(hotkey.hotkey.name) dictation shortcut will stop until you open Planetka again. Use Close to hide windows while keeping dictation running."
         alert.addButton(withTitle: "Keep Running")
         alert.addButton(withTitle: "Stop Dictation")
         return alert.runModal() == .alertSecondButtonReturn
@@ -13738,9 +14067,9 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         showAppForModal()
         let alert = NSAlert()
         alert.alertStyle = .informational
-        alert.messageText = "SuperDictate Reopened After an Unexpected Exit"
+        alert.messageText = "Planetka Reopened After an Unexpected Exit"
         alert.informativeText = """
-            Parakey appears to have exited last time without a normal shutdown. Nothing was sent anywhere.
+            Planetka appears to have exited last time without a normal shutdown. Nothing was sent anywhere.
 
             You can copy a privacy-safe diagnostics report or open the local log if you want to file an issue.
             """
@@ -13762,7 +14091,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.title = "Save Diagnostics"
         panel.message = "Save a privacy-safe diagnostics report for a GitHub issue."
         panel.prompt = "Save"
-        panel.nameFieldStringValue = "Parakey Diagnostics.txt"
+        panel.nameFieldStringValue = "Planetka Diagnostics.txt"
         panel.allowedContentTypes = [.plainText]
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -13827,7 +14156,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return ("transcribing", "Transcribing your last recording.")
         }
         if isReady {
-            let verb = settings.triggerMode == .hold ? "Hold" : "Press"
+            let verb = hotkeyTriggerVerb(settings.triggerMode)
             return ("ready", "\(verb) \(hotkey.hotkey.name) to dictate.")
         }
         if let failure = startupFailure {
@@ -13927,7 +14256,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // in the menu that gets such an indicator — every other row
         // sits flush against the left edge. The wrapper produces the
         // identical behaviour with no auto-glyph.
-        let quit = NSMenuItem(title: "Quit SuperDictate",
+        let quit = NSMenuItem(title: "Quit Planetka",
                               action: #selector(quitClicked(_:)),
                               keyEquivalent: "q")
         quit.target = self
@@ -13984,7 +14313,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         sub.addItem(.separator())
 
-        let about = NSMenuItem(title: "About SuperDictate",
+        let about = NSMenuItem(title: "About Planetka",
                                action: #selector(showAboutClicked(_:)),
                                keyEquivalent: "")
         about.target = self
@@ -14061,7 +14390,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         if isReady {
             let hk = hotkey.hotkey.name
-            let verb = settings.triggerMode == .hold ? "Hold" : "Press"
+            let verb = hotkeyTriggerVerb(settings.triggerMode)
             return "\(verb) \(hk) to dictate"
         }
         if let failure = startupFailure {
@@ -14076,16 +14405,16 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if isCoreRuntimeReady {
             return "Starting hotkey listener…"
         }
-        return "SuperDictate is not ready"
+        return "Planetka is not ready"
     }
 
     private func diagnosticsText() -> String {
         let generated = ISO8601DateFormatter().string(from: Date())
         let bundlePath = Bundle.main.bundlePath
         let installKind: String
-        if bundlePath == "/Applications/SuperDictate.app" {
+        if bundlePath == "/Applications/Planetka.app" {
             installKind = "Applications app"
-        } else if bundlePath == "/tmp/SuperDictate-dev.app" {
+        } else if bundlePath == "/tmp/Planetka-dev.app" {
             installKind = "signed dev app"
         } else {
             installKind = "other"
@@ -14249,7 +14578,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
                               styleMask: [.titled, .closable],
                               backing: .buffered,
                               defer: false)
-        window.title = "Set Up SuperDictate"
+        window.title = "Set Up Planetka"
         window.isReleasedWhenClosed = false
         window.delegate = self
         setupChecklistWindow = window
@@ -14312,8 +14641,8 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         root.edgeInsets = NSEdgeInsets(top: 20, left: 22, bottom: 18, right: 22)
         root.translatesAutoresizingMaskIntoConstraints = false
 
-        let title = setupLabel("Set Up SuperDictate", font: .systemFont(ofSize: 22, weight: .semibold))
-        let subtitle = setupLabel("Finish these checks before dictating. SuperDictate keeps this setup local to your Mac.",
+        let title = setupLabel("Set Up Planetka", font: .systemFont(ofSize: 22, weight: .semibold))
+        let subtitle = setupLabel("Finish these checks before dictating. Planetka keeps this setup local to your Mac.",
                                   font: .systemFont(ofSize: 13),
                                   color: .secondaryLabelColor)
         subtitle.preferredMaxLayoutWidth = 476
@@ -14331,7 +14660,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         root.addArrangedSubview(makeHotkeySetupRow())
 
         if !setupChecklistIsComplete {
-            let tip = setupLabel("Tip: If macOS does not show a permission prompt, click 'Open Settings' and enable SuperDictate in the displayed privacy section.",
+            let tip = setupLabel("Tip: If macOS does not show a permission prompt, click 'Open Settings' and enable Planetka in the displayed privacy section.",
                                  font: .systemFont(ofSize: 11),
                                  color: .secondaryLabelColor)
             tip.preferredMaxLayoutWidth = 476
@@ -14390,7 +14719,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func setupChecklistSummary() -> String {
         setupChecklistIsComplete
-            ? "Setup is complete. Use SuperDictate from the Dock or shortcuts."
+            ? "Setup is complete. Use Planetka from the Dock or shortcuts."
             : "You can close this window; the menu will keep tracking setup."
     }
 
@@ -14451,9 +14780,9 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         case .microphone:
             return "Captures your voice while dictating. Click 'Grant', then click 'OK' in the macOS prompt."
         case .accessibility:
-            return "Pastes the transcript at your cursor. Click 'Grant' to open System Settings → Privacy & Security → Accessibility, then enable the toggle next to 'SuperDictate'."
+            return "Pastes the transcript at your cursor. Click 'Grant' to open System Settings → Privacy & Security → Accessibility, then enable the toggle next to 'Planetka'."
         case .inputMonitoring:
-            return "Lets SuperDictate detect the dictation hotkey. Click 'Grant' to open System Settings → Privacy & Security → Input Monitoring, then enable the toggle next to 'SuperDictate'."
+            return "Lets Planetka detect the dictation hotkey. Click 'Grant' to open System Settings → Privacy & Security → Input Monitoring, then enable the toggle next to 'Planetka'."
         }
     }
 
@@ -14679,13 +15008,13 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             launchAtLogin.state = .on
         case .requiresApproval:
             launchAtLogin.state = .mixed
-            launchAtLogin.toolTip = "Approve SuperDictate in System Settings → General → Login Items."
+            launchAtLogin.toolTip = "Approve Planetka in System Settings → General → Login Items."
         default:
             launchAtLogin.state = .off
         }
         sub.addItem(launchAtLogin)
 
-        let dock = NSMenuItem(title: "Show SuperDictate in Dock",
+        let dock = NSMenuItem(title: "Show Planetka in Dock",
                               action: #selector(toggleDock(_:)),
                               keyEquivalent: "")
         dock.target = self
@@ -14739,7 +15068,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             && !isRecording
             && !isBusy
             && !isTerminating
-        reset.toolTip = "Use Right Command for dictation."
+        reset.toolTip = "Use Fn for dictation."
         hkSub.addItem(reset)
 
         hkParent.submenu = hkSub
@@ -14750,7 +15079,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let tmParent = NSMenuItem(title: "Trigger", action: nil, keyEquivalent: "")
         let tmSub = NSMenu()
         tmSub.autoenablesItems = false
-        for mode in [TriggerMode.hold, .toggle] {
+        for mode in [TriggerMode.holdOrDoubleTap, .hold, .toggle] {
             let item = NSMenuItem(title: TRIGGER_DISPLAY[mode] ?? mode.rawValue,
                                   action: #selector(selectTriggerMode(_:)),
                                   keyEquivalent: "")
@@ -15217,7 +15546,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         showAppForModal()
         let panel = NSOpenPanel()
         panel.title = "Import Text Corrections"
-        panel.message = "Choose a Parakey corrections file to import."
+        panel.message = "Choose a Planetka corrections file to import."
         panel.prompt = "Import"
         panel.allowedContentTypes = [TranscriptCorrectionsTransfer.contentType]
         panel.allowsMultipleSelection = false
@@ -15252,7 +15581,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             cleanupPendingSharedCorrections(reason: "new share")
 
             let folder = FileManager.default.temporaryDirectory
-                .appendingPathComponent("Parakey-\(UUID().uuidString)", isDirectory: true)
+                .appendingPathComponent("Planetka-\(UUID().uuidString)", isDirectory: true)
             let url = folder.appendingPathComponent(CORRECTIONS_FILE_NAME)
             try TranscriptCorrectionsTransfer.write(settings.transcriptCorrections, to: url)
             pendingSharedCorrectionsURL = url
@@ -15280,9 +15609,9 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let alert = NSAlert()
         alert.messageText = "Set Up Text Correction Sync"
         alert.informativeText = """
-            Parakey can keep corrections in one local file. Put that file in iCloud Drive, Dropbox, Syncthing, or another synced folder to keep multiple Macs aligned without a Parakey account.
+            Planetka can keep corrections in one local file. Put that file in iCloud Drive, Dropbox, Syncthing, or another synced folder to keep multiple Macs aligned without a Planetka account.
 
-            Parakey only reads and writes the file you choose.
+            Planetka only reads and writes the file you choose.
             """
         alert.addButton(withTitle: "Create Sync File")
         alert.addButton(withTitle: "Use Existing File")
@@ -15308,7 +15637,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Stop Syncing Text Corrections?"
-        alert.informativeText = "Parakey will keep the corrections already on this Mac. The sync file will not be deleted."
+        alert.informativeText = "Planetka will keep the corrections already on this Mac. The sync file will not be deleted."
         alert.addButton(withTitle: "Stop Syncing")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -15364,7 +15693,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         showAppForModal()
         let panel = NSSavePanel()
         panel.title = "Create Text Correction Sync File"
-        panel.message = "Choose where Parakey should keep the sync file. A folder synced by iCloud Drive or another provider works best."
+        panel.message = "Choose where Planetka should keep the sync file. A folder synced by iCloud Drive or another provider works best."
         panel.prompt = "Create"
         panel.nameFieldStringValue = CORRECTIONS_FILE_NAME
         panel.allowedContentTypes = [TranscriptCorrectionsTransfer.contentType]
@@ -15385,7 +15714,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         showAppForModal()
         let panel = NSOpenPanel()
         panel.title = "Choose Text Correction Sync File"
-        panel.message = "Choose an existing Parakey corrections file."
+        panel.message = "Choose an existing Planetka corrections file."
         panel.prompt = "Use File"
         panel.allowedContentTypes = [TranscriptCorrectionsTransfer.contentType]
         panel.allowsMultipleSelection = false
@@ -15666,7 +15995,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         case .fingerprintUnavailable:
             if presentErrors {
                 showCorrectionTransferError(title: "Sync Failed",
-                                            message: "Parakey could not find the selected sync file.")
+                                            message: "Planetka could not find the selected sync file.")
             }
         case .unchanged:
             break
@@ -15783,7 +16112,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         showCorrectionTransferError(
             title: "Text Correction Sync Conflict",
             message: """
-            The sync file changed before this Mac wrote its latest text correction edits. Parakey kept the corrections on this Mac and stopped syncing so it would not overwrite the file.
+            The sync file changed before this Mac wrote its latest text correction edits. Planetka kept the corrections on this Mac and stopped syncing so it would not overwrite the file.
 
             Reconnect the sync file after importing or resolving the conflicting correction\(conflictingSources.count == 1 ? "" : "s"):
             \(examples)\(remainingText)
@@ -15804,7 +16133,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             showCorrectionTransferError(
                 title: "Text Correction Sync Stopped",
                 message: """
-                Parakey stopped syncing because the selected corrections file is no longer safe to use.
+                Planetka stopped syncing because the selected corrections file is no longer safe to use.
 
                 \(error.localizedDescription)
                 """
@@ -15831,7 +16160,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         showAppForModal()
         let alert = NSAlert()
         alert.messageText = existing == nil ? "Add Text Correction" : "Edit Text Correction"
-        alert.informativeText = "Add the incorrect text Parakey typed, then the text it should paste instead."
+        alert.informativeText = "Add the incorrect text Planetka typed, then the text it should paste instead."
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")
 
@@ -16022,7 +16351,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self.recordStartupFailure(
                     stage: .hotkeyListener,
                     error: NSError(
-                        domain: "Parakey",
+                        domain: "Planetka",
                         code: -5,
                         userInfo: [
                             NSLocalizedDescriptionKey: "The hotkey listener could not restart after recording a hotkey."
@@ -16228,7 +16557,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func showAboutClicked(_ sender: NSMenuItem) {
         showAppForModal()
         let alert = NSAlert()
-        alert.messageText = "SuperDictate \(currentBundleVersion())"
+        alert.messageText = "Planetka \(currentBundleVersion())"
         alert.informativeText = """
             Lightweight push-to-talk dictation for Apple Silicon Macs.
 
@@ -16241,13 +16570,13 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             Permissions: microphone audio, paste-at-cursor, push-to-talk hotkey.
 
             Open source, based on Parakey by Richard Courtman.
-            github.com/shlgd/SuperDictate · MIT licensed
+            github.com/Aliwers/Planetka · MIT licensed
             """
         // Use our app icon instead of NSAlert's default exclamation
-        // mark. .icns lives in Contents/Resources/Parakey.icns;
+        // mark. .icns lives in Contents/Resources/Planetka.icns;
         // NSImage(named:) on Bundle.main resolves it by filename
         // sans extension.
-        if let icon = NSImage(named: "Parakey") {
+        if let icon = NSImage(named: "Planetka") {
             alert.icon = icon
         }
         alert.addButton(withTitle: "OK")
@@ -16368,7 +16697,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func showReleaseNotes(for release: GitHubRelease) {
         showAppForModal()
         let alert = NSAlert()
-        alert.messageText = "Parakey v\(release.version)"
+        alert.messageText = "Planetka v\(release.version)"
         var body = release.body.trimmingCharacters(in: .whitespacesAndNewlines)
         if body.isEmpty { body = "(No release notes available for this version.)" }
         else if body.count > 1500 { body = String(body.prefix(1500)) + "\n\n…" }
@@ -16460,7 +16789,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func showUpdateAvailableAlert(for release: GitHubRelease, currentVersion: String) {
         showAppForModal()
         let alert = NSAlert()
-        alert.messageText = "Parakey v\(release.version) is available"
+        alert.messageText = "Planetka v\(release.version) is available"
         alert.informativeText = "You're running v\(currentVersion). Nothing is installed unless you choose Update Now."
         alert.addButton(withTitle: "Update Now")
         alert.addButton(withTitle: "What's New")
@@ -16527,7 +16856,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func showUpToDateAlert(currentVersion: String) {
         showAppForModal()
         let alert = NSAlert()
-        alert.messageText = "Parakey is up to date"
+        alert.messageText = "Planetka is up to date"
         alert.informativeText = "You're running v\(currentVersion)."
         alert.addButton(withTitle: "OK")
         alert.runModal()
@@ -16561,7 +16890,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         To update, run this command in Terminal:
 
-        curl -fsSL https://raw.githubusercontent.com/shlgd/SuperDictate/main/install.sh | bash
+        curl -fsSL https://raw.githubusercontent.com/Aliwers/Planetka/main/install.sh | bash
         """
         alert.addButton(withTitle: "Open Release Page")
         alert.addButton(withTitle: "Close")
@@ -16583,7 +16912,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         You can update from Terminal:
 
-        curl -fsSL https://raw.githubusercontent.com/shlgd/SuperDictate/main/install.sh | bash
+        curl -fsSL https://raw.githubusercontent.com/Aliwers/Planetka/main/install.sh | bash
         """
         alert.addButton(withTitle: "OK")
         alert.runModal()
@@ -16594,7 +16923,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// waitUntilExit() here would stall every keystroke system-wide
     /// (and a >1 s stall makes macOS disable the tap), so the check
     /// runs on a background queue and reports back to the main actor.
-    private static let brewPreflightQueue = DispatchQueue(label: "ParakeyBrewPreflight",
+    private static let brewPreflightQueue = DispatchQueue(label: "PlanetkaBrewPreflight",
                                                           qos: .userInitiated)
 
     private func isBrewInstall(brewPath: String,
@@ -16676,14 +17005,14 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             statePath = try createPrivateUpdateProgressStateFile()
         } catch {
             log("update: creating progress state failed: \(error.localizedDescription)")
-            showUpdateCouldNotStart(detail: "Parakey couldn't prepare the update progress window.")
+            showUpdateCouldNotStart(detail: "Planetka couldn't prepare the update progress window.")
             return
         }
 
         // Detached shell helper refreshes Homebrew, downloads the cask,
         // waits for THIS process to exit, upgrades/reinstalls the app,
         // verifies the installed bundle version, then re-opens
-        // /Applications/SuperDictate.app. We can't run the install step
+        // /Applications/Planetka.app. We can't run the install step
         // in-process because it replaces the bundle we're executing from.
         let script = updateHelperScript(pid: getpid(),
                                         brewPath: brewPath,
@@ -16700,7 +17029,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         } catch {
             try? FileManager.default.removeItem(atPath: statePath)
             log("update: writing helper failed: \(error.localizedDescription)")
-            showUpdateCouldNotStart(detail: "Parakey couldn't write the update helper script.")
+            showUpdateCouldNotStart(detail: "Planetka couldn't write the update helper script.")
             return
         }
         let helperLog: PrivateOutputFile
@@ -16710,7 +17039,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             try? FileManager.default.removeItem(atPath: helperPath)
             try? FileManager.default.removeItem(atPath: statePath)
             log("update: opening helper log failed: \(error.localizedDescription)")
-            showUpdateCouldNotStart(detail: "Parakey couldn't open the update helper log.")
+            showUpdateCouldNotStart(detail: "Planetka couldn't open the update helper log.")
             return
         }
 
@@ -16724,7 +17053,7 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             try? FileManager.default.removeItem(atPath: statePath)
             helperLog.handle.closeFile()
             log("update: launching progress app failed: \(error.localizedDescription)")
-            showUpdateCouldNotStart(detail: "Parakey couldn't open the update progress window.")
+            showUpdateCouldNotStart(detail: "Planetka couldn't open the update progress window.")
             return
         }
 
@@ -16740,9 +17069,9 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             try? FileManager.default.removeItem(atPath: helperPath)
             helperLog.handle.closeFile()
             try? writePrivateUpdateProgressState(phase: "failed",
-                                                 message: "Parakey couldn't launch the update helper.",
+                                                 message: "Planetka couldn't launch the update helper.",
                                                  to: statePath)
-            showUpdateCouldNotStart(detail: "Parakey couldn't launch the update helper.")
+            showUpdateCouldNotStart(detail: "Planetka couldn't launch the update helper.")
             return
         }
         log("update helper spawned \(privacySafeLogPath(helperPath)), progress app \(privacySafeLogPath(progressAppPath)), logging to \(privacySafeLogPath(helperLog.path)); quitting for upgrade")
@@ -16751,6 +17080,70 @@ final class ParakeyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+}
+
+// MARK: - Legacy rename migration
+
+/// SuperDictate kept history, settings and the AI key under its own bundle
+/// identifier. Renaming the app to Planetka would leave all of it stranded, so
+/// the first Planetka launch adopts it once and then never looks again.
+enum LegacyRenameMigration {
+    static func run() {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory,
+                                               in: .userDomainMask)[0]
+        adoptSupportDirectory(
+            legacy: support.appendingPathComponent(LEGACY_APP_SUPPORT_DIR_NAME, isDirectory: true),
+            current: support.appendingPathComponent(APP_SUPPORT_DIR_NAME, isDirectory: true)
+        )
+        // `UserDefaults(suiteName:)` returns nil for the app's own bundle
+        // identifier, and `Settings` reads `.standard` anyway.
+        adoptDefaults(legacyPlist: legacyDefaultsURL(), into: .standard)
+        AIKeyStore.adoptLegacyKey()
+        PlanetkaAgentService.retireLegacyAgent()
+    }
+
+    static func legacyDefaultsURL() -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Preferences/\(LEGACY_BUNDLE_IDENTIFIER).plist")
+    }
+
+    /// A plain move: history and statistics are the whole directory, and
+    /// copying 100 transcripts twice would only invite a half-written state.
+    @discardableResult
+    static func adoptSupportDirectory(legacy: URL, current: URL) -> Bool {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: legacy.path),
+              !fileManager.fileExists(atPath: current.path)
+        else { return false }
+        do {
+            try fileManager.moveItem(at: legacy, to: current)
+            log("migrated \(LEGACY_APP_SUPPORT_DIR_NAME) application support to \(APP_SUPPORT_DIR_NAME)")
+            return true
+        } catch {
+            log("could not migrate the legacy support directory: \(error)")
+            return false
+        }
+    }
+
+    /// Reads the old preferences file directly instead of a `UserDefaults`
+    /// suite, because `dictionaryRepresentation()` would drag every inherited
+    /// global domain key in with it.
+    @discardableResult
+    static func adoptDefaults(legacyPlist: URL, into defaults: UserDefaults) -> Bool {
+        guard !defaults.bool(forKey: LEGACY_MIGRATION_DEFAULTS_KEY) else { return false }
+        defaults.set(true, forKey: LEGACY_MIGRATION_DEFAULTS_KEY)
+        guard let data = try? Data(contentsOf: legacyPlist),
+              let stored = try? PropertyListSerialization.propertyList(from: data, format: nil),
+              let values = stored as? [String: Any]
+        else { return false }
+        var adopted = 0
+        for (key, value) in values where defaults.object(forKey: key) == nil {
+            defaults.set(value, forKey: key)
+            adopted += 1
+        }
+        log("adopted \(adopted) settings from \(LEGACY_BUNDLE_IDENTIFIER)")
+        return adopted > 0
+    }
 }
 
 // MARK: - Entry point
@@ -16766,7 +17159,7 @@ private enum SelfTestFailure: Error, CustomStringConvertible {
     }
 }
 
-private enum ParakeySelfTest {
+private enum PlanetkaSelfTest {
     static func run(arguments: [String]) -> Int32? {
         guard arguments.count >= 2, arguments[0] == "--self-test" else { return nil }
         guard arguments.count == 2 else { return fail("usage") }
@@ -16816,6 +17209,8 @@ private enum ParakeySelfTest {
             return runSuite("diagnostics", testDiagnostics)
         case "insertion-target":
             return runSuite("insertion-target", testInsertionTargetTracking)
+        case "legacy-rename":
+            return runSuite("legacy-rename", testLegacyRenameMigration)
         case "insertion-target-live":
             return runSuite("insertion-target-live", testLiveInsertionTargetProbe)
         case "all":
@@ -16863,6 +17258,7 @@ private enum ParakeySelfTest {
         try testPrivateLogAppend()
         try testDiagnostics()
         try testInsertionTargetTracking()
+        try testLegacyRenameMigration()
     }
 
     private static func testAICleanup() throws {
@@ -17128,7 +17524,7 @@ private enum ParakeySelfTest {
                    equals: 600,
                    "settings should shrink on a shorter visible screen")
 
-        let settingsSuiteName = "com.local.superdictate.self-test.ai-cleanup.\(UUID().uuidString)"
+        let settingsSuiteName = "com.local.planetka.self-test.ai-cleanup.\(UUID().uuidString)"
         guard let settingsDefaults = UserDefaults(suiteName: settingsSuiteName) else {
             throw SelfTestFailure.failed("could not create isolated AI cleanup defaults")
         }
@@ -17292,8 +17688,8 @@ private enum ParakeySelfTest {
 
     private static func testPrivateLogAppend() throws {
         try expect(
-            privacySafeLogPath("/Users/example/Documents/Parakey Diagnostics.txt"),
-            equals: "Parakey Diagnostics.txt",
+            privacySafeLogPath("/Users/example/Documents/Planetka Diagnostics.txt"),
+            equals: "Planetka Diagnostics.txt",
             "log path labels should omit parent directories"
         )
         try expect(
@@ -17302,23 +17698,23 @@ private enum ParakeySelfTest {
             "log path labels should fall back when no filename is available"
         )
         try expect(
-            privacySafeBundlePath("/Applications/SuperDictate.app"),
-            equals: "/Applications/SuperDictate.app",
+            privacySafeBundlePath("/Applications/Planetka.app"),
+            equals: "/Applications/Planetka.app",
             "bundle path labels should keep the canonical install path"
         )
         try expect(
-            privacySafeBundlePath("/Users/example/Downloads/SuperDictate.app"),
-            equals: "SuperDictate.app",
+            privacySafeBundlePath("/Users/example/Downloads/Planetka.app"),
+            equals: "Planetka.app",
             "bundle path labels should omit parent directories for nonstandard installs"
         )
 
         let fm = FileManager.default
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("parakey-log-test-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("planetka-log-test-\(UUID().uuidString)", isDirectory: true)
         try fm.createDirectory(at: root, withIntermediateDirectories: false)
         defer { try? fm.removeItem(at: root) }
 
-        let logFile = root.appendingPathComponent("SuperDictate.log")
+        let logFile = root.appendingPathComponent("Planetka.log")
         try appendPrivateLogData(Data("one\n".utf8), to: logFile)
         try appendPrivateLogData(Data("two\n".utf8), to: logFile)
 
@@ -17385,8 +17781,8 @@ private enum ParakeySelfTest {
                 appVersion: "9.8.7",
                 appBuild: "123",
                 macOS: "Version 26.0",
-                bundleID: "com.local.superdictate",
-                bundlePath: "/Applications/SuperDictate.app",
+                bundleID: "com.local.planetka",
+                bundlePath: "/Applications/Planetka.app",
                 installKind: "Applications app",
                 status: "Hold Right Option to dictate",
                 startup: "Runtime ready",
@@ -17406,7 +17802,7 @@ private enum ParakeySelfTest {
                 ],
                 updateLines: ["Pending update: none"],
                 microphoneLines: ["Selected: System default", "Available inputs: none reported"],
-                logPath: "~/Library/Logs/SuperDictate.log",
+                logPath: "~/Library/Logs/Planetka.log",
                 recentLogLines: ["[10:00:00] release: 1.23 s captured, transcribing"]
             )
         )
@@ -17426,11 +17822,11 @@ private enum ParakeySelfTest {
 
         let fm = FileManager.default
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("parakey-diagnostics-test-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("planetka-diagnostics-test-\(UUID().uuidString)", isDirectory: true)
         try fm.createDirectory(at: root, withIntermediateDirectories: false)
         defer { try? fm.removeItem(at: root) }
 
-        let logFile = root.appendingPathComponent("SuperDictate.log")
+        let logFile = root.appendingPathComponent("Planetka.log")
         for line in 1...6 {
             try appendPrivateLogData(Data("[10:00:0\(line)] line \(line)\n".utf8), to: logFile)
         }
@@ -17484,6 +17880,10 @@ private enum ParakeySelfTest {
         try testEnterShortcutModeSelection()
         try testTogglePressFlipsOnceAndReleaseIsNoOp()
         try testToggleGatedPressDoesNotFlipToggleState()
+        try testHoldOrDoubleTapHoldStopsOnRelease()
+        try testHoldOrDoubleTapDoubleTapLatchesHandsFree()
+        try testHoldOrDoubleTapSingleTapResolvesToStop()
+        try testHoldOrDoubleTapWorksWithFnModifier()
         try testEscapePassesThroughWhenNotRecording()
         try testEscapeSuppressesCancelRepeatAndKeyUpWhileRecording()
     }
@@ -17616,7 +18016,7 @@ private enum ParakeySelfTest {
             ),
             equals: .rolledBack(
                 previous: f5,
-                message: "Parakey could not save that hotkey, so it kept F5."
+                message: "Planetka could not save that hotkey, so it kept F5."
             ),
             "hotkey preference update should roll back when persisted settings disagree"
         )
@@ -17755,6 +18155,13 @@ private enum ParakeySelfTest {
     }
 
     private static func testReadiness() throws {
+        // This binary runs from `.build`, never from `/Applications`, so it
+        // catches any regression that lets the agent path follow `Bundle.main`.
+        try expect(
+            PlanetkaAgentService.agentExecutablePath(),
+            equals: "\(INSTALLED_APP_BUNDLE_PATH)/Contents/MacOS/Planetka",
+            "launch agent must always point at the installed bundle"
+        )
         try expect(
             readinessTransition(isReady: false,
                                 isCoreRuntimeReady: false,
@@ -18001,7 +18408,7 @@ private enum ParakeySelfTest {
             "disabled final period postprocessing should preserve existing behavior"
         )
 
-        let settingsSuiteName = "com.local.superdictate.self-test.postprocessing.\(UUID().uuidString)"
+        let settingsSuiteName = "com.local.planetka.self-test.postprocessing.\(UUID().uuidString)"
         guard let settingsDefaults = UserDefaults(suiteName: settingsSuiteName) else {
             throw SelfTestFailure.failed("could not create isolated postprocessing defaults")
         }
@@ -18086,7 +18493,7 @@ private enum ParakeySelfTest {
         )
 
         let pasteboardProbe = MainActor.assumeIsolated {
-            let pasteboardName = NSPasteboard.Name("com.local.superdictate.self-test.\(UUID().uuidString)")
+            let pasteboardName = NSPasteboard.Name("com.local.planetka.self-test.\(UUID().uuidString)")
             let pasteboard = NSPasteboard(name: pasteboardName)
             let wrote = ClipboardPasteInserter.write("pasteboard probe", to: pasteboard)
             let snapshot = PasteboardSnapshot.capture(from: pasteboard)
@@ -18106,7 +18513,7 @@ private enum ParakeySelfTest {
         )
 
         let lazyPasteProbe = MainActor.assumeIsolated {
-            let pasteboardName = NSPasteboard.Name("com.local.superdictate.lazy-paste-test.\(UUID().uuidString)")
+            let pasteboardName = NSPasteboard.Name("com.local.planetka.lazy-paste-test.\(UUID().uuidString)")
             let pasteboard = NSPasteboard(name: pasteboardName)
             _ = ClipboardPasteInserter.write("older clipboard text", to: pasteboard)
             let snapshot = PasteboardSnapshot.capture(from: pasteboard)
@@ -18153,7 +18560,7 @@ private enum ParakeySelfTest {
         )
 
         let untouchedUserCopyProbe = MainActor.assumeIsolated {
-            let pasteboardName = NSPasteboard.Name("com.local.superdictate.changed-paste-test.\(UUID().uuidString)")
+            let pasteboardName = NSPasteboard.Name("com.local.planetka.changed-paste-test.\(UUID().uuidString)")
             let pasteboard = NSPasteboard(name: pasteboardName)
             _ = ClipboardPasteInserter.write("older clipboard text", to: pasteboard)
             let snapshot = PasteboardSnapshot.capture(from: pasteboard)
@@ -18679,13 +19086,13 @@ private enum ParakeySelfTest {
         let applied = TranscriptCorrector.apply(
             to: "parakeet tdt and parakeetish and PARakeet",
             corrections: [
-                TranscriptCorrection(source: "parakeet", replacement: "Parakey"),
+                TranscriptCorrection(source: "parakeet", replacement: "Planetka"),
                 TranscriptCorrection(source: "parakeet tdt", replacement: "Parakeet TDT")
             ]
         )
         try expect(
             applied.text,
-            equals: "Parakeet TDT and parakeetish and Parakey",
+            equals: "Parakeet TDT and parakeetish and Planetka",
             "corrections should prefer longer phrases and respect word boundaries"
         )
         try expect(
@@ -18730,7 +19137,7 @@ private enum ParakeySelfTest {
         let transferTmpDir = URL(fileURLWithPath: NSTemporaryDirectory())
         let transferFileManager = FileManager.default
         let oversized = transferTmpDir
-            .appendingPathComponent("parakey-corrections-oversized-\(UUID().uuidString).json")
+            .appendingPathComponent("planetka-corrections-oversized-\(UUID().uuidString).json")
         try Data(repeating: 0x20, count: TranscriptCorrectionsTransfer.maxFileBytes + 1)
             .write(to: oversized)
         defer { try? transferFileManager.removeItem(at: oversized) }
@@ -18746,7 +19153,7 @@ private enum ParakeySelfTest {
                    "correction transfer should reject oversized files before decoding")
 
         let nonFile = transferTmpDir
-            .appendingPathComponent("parakey-corrections-directory-\(UUID().uuidString)")
+            .appendingPathComponent("planetka-corrections-directory-\(UUID().uuidString)")
         try transferFileManager.createDirectory(at: nonFile, withIntermediateDirectories: false)
         defer { try? transferFileManager.removeItem(at: nonFile) }
         var nonFileRejected = false
@@ -18761,14 +19168,14 @@ private enum ParakeySelfTest {
                    "correction transfer should reject non-file paths")
 
         let readTarget = transferTmpDir
-            .appendingPathComponent("parakey-corrections-read-target-\(UUID().uuidString).json")
+            .appendingPathComponent("planetka-corrections-read-target-\(UUID().uuidString).json")
         try TranscriptCorrectionsTransfer.write(
             [TranscriptCorrection(source: "source", replacement: "replacement")],
             to: readTarget
         )
         defer { try? transferFileManager.removeItem(at: readTarget) }
         let readLink = transferTmpDir
-            .appendingPathComponent("parakey-corrections-read-link-\(UUID().uuidString).json")
+            .appendingPathComponent("planetka-corrections-read-link-\(UUID().uuidString).json")
         try transferFileManager.createSymbolicLink(at: readLink, withDestinationURL: readTarget)
         defer { try? transferFileManager.removeItem(at: readLink) }
         var symlinkReadRejected = false
@@ -18783,11 +19190,11 @@ private enum ParakeySelfTest {
                    "correction transfer should reject reads through leaf symlinks")
 
         let writeTarget = transferTmpDir
-            .appendingPathComponent("parakey-corrections-write-target-\(UUID().uuidString).json")
+            .appendingPathComponent("planetka-corrections-write-target-\(UUID().uuidString).json")
         try Data("target\n".utf8).write(to: writeTarget)
         defer { try? transferFileManager.removeItem(at: writeTarget) }
         let writeLink = transferTmpDir
-            .appendingPathComponent("parakey-corrections-write-link-\(UUID().uuidString).json")
+            .appendingPathComponent("planetka-corrections-write-link-\(UUID().uuidString).json")
         try transferFileManager.createSymbolicLink(at: writeLink, withDestinationURL: writeTarget)
         defer { try? transferFileManager.removeItem(at: writeLink) }
         var symlinkWriteRejected = false
@@ -18859,19 +19266,19 @@ private enum ParakeySelfTest {
             "sync merge should report same-source edits that changed differently on both sides"
         )
 
-        let normalizedSyncPath = normalizedCorrectionSyncFilePath(" /tmp/superdictate/../SuperDictate Corrections.superdictate-corrections\n")
+        let normalizedSyncPath = normalizedCorrectionSyncFilePath(" /tmp/planetka/../Planetka Corrections.planetka-corrections\n")
         try expect(
             normalizedSyncPath,
-            equals: "/tmp/SuperDictate Corrections.superdictate-corrections",
+            equals: "/tmp/Planetka Corrections.planetka-corrections",
             "correction sync path normalization should trim and standardize absolute paths"
         )
         try expect(
-            normalizedCorrectionSyncFilePath("relative/path.superdictate-corrections"),
+            normalizedCorrectionSyncFilePath("relative/path.planetka-corrections"),
             equals: nil,
             "correction sync path normalization should reject relative paths"
         )
         try expect(
-            normalizedCorrectionSyncFilePath("/tmp/\u{0}superdictate.superdictate-corrections"),
+            normalizedCorrectionSyncFilePath("/tmp/\u{0}planetka.planetka-corrections"),
             equals: nil,
             "correction sync path normalization should reject NUL bytes"
         )
@@ -18886,18 +19293,18 @@ private enum ParakeySelfTest {
         // the periodic auto-write to overwrite an unrelated file.
         let tmpDir = URL(fileURLWithPath: NSTemporaryDirectory())
         let fm = FileManager.default
-        let nonexistent = tmpDir.appendingPathComponent("parakey-sync-test-missing-\(UUID().uuidString).json")
+        let nonexistent = tmpDir.appendingPathComponent("planetka-sync-test-missing-\(UUID().uuidString).json")
         try validateCorrectionSyncPath(nonexistent) // missing files are allowed (first-time write)
 
-        let regular = tmpDir.appendingPathComponent("parakey-sync-test-regular-\(UUID().uuidString).json")
+        let regular = tmpDir.appendingPathComponent("planetka-sync-test-regular-\(UUID().uuidString).json")
         try Data("{}".utf8).write(to: regular)
         defer { try? fm.removeItem(at: regular) }
         try validateCorrectionSyncPath(regular)
 
-        let target = tmpDir.appendingPathComponent("parakey-sync-test-target-\(UUID().uuidString).json")
+        let target = tmpDir.appendingPathComponent("planetka-sync-test-target-\(UUID().uuidString).json")
         try Data("{}".utf8).write(to: target)
         defer { try? fm.removeItem(at: target) }
-        let link = tmpDir.appendingPathComponent("parakey-sync-test-link-\(UUID().uuidString).json")
+        let link = tmpDir.appendingPathComponent("planetka-sync-test-link-\(UUID().uuidString).json")
         try fm.createSymbolicLink(at: link, withDestinationURL: target)
         defer { try? fm.removeItem(at: link) }
         var rejected = false
@@ -18914,7 +19321,7 @@ private enum ParakeySelfTest {
             "unsafe sync paths should stop configured correction sync"
         )
         try expect(
-            shouldStopCorrectionSync(afterPathValidationError: NSError(domain: "ParakeyTest", code: 1)),
+            shouldStopCorrectionSync(afterPathValidationError: NSError(domain: "PlanetkaTest", code: 1)),
             equals: false,
             "unrelated sync errors should not clear the configured correction sync path"
         )
@@ -18924,8 +19331,8 @@ private enum ParakeySelfTest {
             "correction sync fingerprinting should not follow leaf symlinks"
         )
 
-        let sameSizeA = tmpDir.appendingPathComponent("parakey-sync-fingerprint-a-\(UUID().uuidString).json")
-        let sameSizeB = tmpDir.appendingPathComponent("parakey-sync-fingerprint-b-\(UUID().uuidString).json")
+        let sameSizeA = tmpDir.appendingPathComponent("planetka-sync-fingerprint-a-\(UUID().uuidString).json")
+        let sameSizeB = tmpDir.appendingPathComponent("planetka-sync-fingerprint-b-\(UUID().uuidString).json")
         try Data("aaaa".utf8).write(to: sameSizeA)
         try Data("bbbb".utf8).write(to: sameSizeB)
         defer {
@@ -19025,7 +19432,7 @@ private enum ParakeySelfTest {
         // the file in the write-to-fingerprint window is still detected
         // by the next scan.
         let fingerprintWriteTarget = tmpDir
-            .appendingPathComponent("parakey-sync-written-fingerprint-\(UUID().uuidString).json")
+            .appendingPathComponent("planetka-sync-written-fingerprint-\(UUID().uuidString).json")
         let fingerprintWrittenData = try TranscriptCorrectionsTransfer.write(
             [TranscriptCorrection(source: "fingerprint", replacement: "match")],
             to: fingerprintWriteTarget
@@ -19079,14 +19486,14 @@ private enum ParakeySelfTest {
         // Import dialog copy: state the original count when entries
         // will be dropped, and warn before a cap-overflowing merge.
         try expect(
-            correctionImportCountText(sourceName: "file.superdictate-corrections",
+            correctionImportCountText(sourceName: "file.planetka-corrections",
                                       originalCount: 3,
                                       keptCount: 3),
-            equals: "file.superdictate-corrections contains 3 corrections.",
+            equals: "file.planetka-corrections contains 3 corrections.",
             "import count text should stay simple when nothing is dropped"
         )
         let truncatedImportText = correctionImportCountText(
-            sourceName: "big.superdictate-corrections",
+            sourceName: "big.planetka-corrections",
             originalCount: MAX_TRANSCRIPT_CORRECTIONS + 88,
             keptCount: MAX_TRANSCRIPT_CORRECTIONS
         )
@@ -19269,6 +19676,60 @@ private enum ParakeySelfTest {
         try expect(leadingBang.removedCount, equals: 1, "leading filler exclamation removal count")
     }
 
+    private static func testLegacyRenameMigration() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("planetka-legacy-rename-\(UUID().uuidString)", isDirectory: true)
+        let legacy = root.appendingPathComponent(LEGACY_APP_SUPPORT_DIR_NAME, isDirectory: true)
+        let current = root.appendingPathComponent(APP_SUPPORT_DIR_NAME, isDirectory: true)
+        let historyName = "AgentStatus.json"
+        try fileManager.createDirectory(at: legacy, withIntermediateDirectories: true)
+        try Data("kept".utf8).write(to: legacy.appendingPathComponent(historyName))
+        defer { try? fileManager.removeItem(at: root) }
+
+        try expect(LegacyRenameMigration.adoptSupportDirectory(legacy: legacy, current: current),
+                   equals: true,
+                   "a SuperDictate support directory should be adopted")
+        try expect(String(data: try Data(contentsOf: current.appendingPathComponent(historyName)),
+                          encoding: .utf8),
+                   equals: Optional("kept"),
+                   "migration should carry history and statistics across intact")
+
+        try fileManager.createDirectory(at: legacy, withIntermediateDirectories: true)
+        try Data("stale".utf8).write(to: legacy.appendingPathComponent(historyName))
+        try expect(LegacyRenameMigration.adoptSupportDirectory(legacy: legacy, current: current),
+                   equals: false,
+                   "an existing Planetka directory must never be replaced by the legacy one")
+        try expect(String(data: try Data(contentsOf: current.appendingPathComponent(historyName)),
+                          encoding: .utf8),
+                   equals: Optional("kept"),
+                   "a second pass must not overwrite migrated history")
+
+        let suiteName = "com.local.planetka.self-test.legacy-rename.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            throw SelfTestFailure.failed("could not create isolated legacy-rename defaults")
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let legacyPlist = root.appendingPathComponent("legacy-defaults.plist")
+        let legacyValues: [String: Any] = ["dictationHotkey": "rightCommand",
+                                           "aiCleanupEnabled": true]
+        try PropertyListSerialization.data(fromPropertyList: legacyValues,
+                                           format: .xml,
+                                           options: 0).write(to: legacyPlist)
+        defaults.set("alreadyChosen", forKey: "dictationHotkey")
+
+        try expect(LegacyRenameMigration.adoptDefaults(legacyPlist: legacyPlist, into: defaults),
+                   equals: true,
+                   "legacy settings should be adopted on the first pass")
+        try expect(defaults.bool(forKey: "aiCleanupEnabled"), equals: true,
+                   "an unset setting should come across from the legacy suite")
+        try expect(defaults.string(forKey: "dictationHotkey"), equals: Optional("alreadyChosen"),
+                   "migration must never overwrite a setting the new suite already holds")
+        try expect(LegacyRenameMigration.adoptDefaults(legacyPlist: legacyPlist, into: defaults),
+                   equals: false,
+                   "the completion marker should stop every later pass")
+    }
+
     private static func testAudioInputDeviceFiltering() throws {
         let pseudo = AudioInputDevice(id: 1,
                                       uid: "CADefaultDeviceAggregate-42159-0",
@@ -19357,7 +19818,7 @@ private enum ParakeySelfTest {
             "startup should pick up a microphone change without an extra audio restart"
         )
 
-        let suiteName = "com.local.superdictate.self-test.input.\(UUID().uuidString)"
+        let suiteName = "com.local.planetka.self-test.input.\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suiteName) else {
             throw SelfTestFailure.failed("could not create isolated input-device defaults")
         }
@@ -19605,7 +20066,7 @@ private enum ParakeySelfTest {
 
         let fm = FileManager.default
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("parakey-model-integrity-\(UUID().uuidString)",
+            .appendingPathComponent("planetka-model-integrity-\(UUID().uuidString)",
                                     isDirectory: true)
         let modelDir = root.appendingPathComponent("Toy.mlmodelc", isDirectory: true)
         try fm.createDirectory(at: modelDir, withIntermediateDirectories: true)
@@ -19720,7 +20181,7 @@ private enum ParakeySelfTest {
     private static func testSpeechModelCachePathSafety() throws {
         let fm = FileManager.default
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("parakey-cache-safety-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("planetka-cache-safety-\(UUID().uuidString)", isDirectory: true)
         let support = root.appendingPathComponent("FluidAudio", isDirectory: true)
         let cache = support.appendingPathComponent("Models/parakeet-v3", isDirectory: true)
         try fm.createDirectory(at: cache, withIntermediateDirectories: true)
@@ -19818,17 +20279,17 @@ private enum ParakeySelfTest {
         let checksum = String(repeating: "a", count: 64)
         let validData = Data("{\"version\":\"9.8.7\",\"sha256\":\"\(checksum)\"}".utf8)
         try expect(
-            try SuperDictateUpdateInstaller.parseManifest(validData,
+            try PlanetkaUpdateInstaller.parseManifest(validData,
                                                            expectedVersion: "9.8.7"),
-            equals: SuperDictateUpdateManifest(version: "9.8.7", sha256: checksum),
+            equals: PlanetkaUpdateManifest(version: "9.8.7", sha256: checksum),
             "direct update manifest should parse a canonical version and SHA-256"
         )
 
         do {
-            _ = try SuperDictateUpdateInstaller.parseManifest(validData,
+            _ = try PlanetkaUpdateInstaller.parseManifest(validData,
                                                                expectedVersion: "9.8.8")
             throw SelfTestFailure.failed("direct update manifest should reject version disagreement")
-        } catch let error as SuperDictateUpdateInstallerError {
+        } catch let error as PlanetkaUpdateInstallerError {
             try expect(error,
                        equals: .manifestVersionMismatch(expected: "9.8.8", actual: "9.8.7"),
                        "direct update manifest should describe version disagreement")
@@ -19836,10 +20297,10 @@ private enum ParakeySelfTest {
 
         let invalidChecksum = Data(#"{"version":"9.8.7","sha256":"not-a-checksum"}"#.utf8)
         do {
-            _ = try SuperDictateUpdateInstaller.parseManifest(invalidChecksum,
+            _ = try PlanetkaUpdateInstaller.parseManifest(invalidChecksum,
                                                                expectedVersion: "9.8.7")
             throw SelfTestFailure.failed("direct update manifest should reject malformed checksums")
-        } catch let error as SuperDictateUpdateInstallerError {
+        } catch let error as PlanetkaUpdateInstallerError {
             try expect(error, equals: .invalidManifest,
                        "direct update manifest should reject malformed checksums")
         }
@@ -19855,7 +20316,7 @@ private enum ParakeySelfTest {
                                        httpVersion: nil,
                                        headerFields: nil)!
         let releaseData = Data(
-            #"{"tag_name":"v9.8.7","body":"Notes","html_url":"https://github.com/shlgd/SuperDictate/releases/tag/v9.8.7"}"#.utf8
+            #"{"tag_name":"v9.8.7","body":"Notes","html_url":"https://github.com/Aliwers/Planetka/releases/tag/v9.8.7"}"#.utf8
         )
 
         try expect(
@@ -19863,7 +20324,7 @@ private enum ParakeySelfTest {
             equals: .success(GitHubRelease(tagName: "v9.8.7",
                                            version: "9.8.7",
                                            body: "Notes",
-                                           htmlURL: "https://github.com/shlgd/SuperDictate/releases/tag/v9.8.7")),
+                                           htmlURL: "https://github.com/Aliwers/Planetka/releases/tag/v9.8.7")),
             "update parsing should decode typed GitHub release payloads"
         )
         try expect(
@@ -19882,7 +20343,7 @@ private enum ParakeySelfTest {
         )
         let oversizedReleaseData = Data(
             """
-            {"tag_name":"v9.8.7","body":"\(String(repeating: "x", count: UpdateCheck.maxReleaseResponseBytes))","html_url":"https://github.com/shlgd/SuperDictate/releases/tag/v9.8.7"}
+            {"tag_name":"v9.8.7","body":"\(String(repeating: "x", count: UpdateCheck.maxReleaseResponseBytes))","html_url":"https://github.com/Aliwers/Planetka/releases/tag/v9.8.7"}
             """.utf8
         )
         try expect(
@@ -19953,7 +20414,7 @@ private enum ParakeySelfTest {
         )
         try expect(
             UpdateCheck.parseLatest(
-                data: Data(#"{"tag_name":"v9.8.7","html_url":"https://github.com/shlgd/SuperDictate/releases/tag/v9.8.8"}"#.utf8),
+                data: Data(#"{"tag_name":"v9.8.7","html_url":"https://github.com/Aliwers/Planetka/releases/tag/v9.8.8"}"#.utf8),
                 response: ok
             ),
             equals: .success(GitHubRelease(tagName: "v9.8.7",
@@ -20005,19 +20466,19 @@ private enum ParakeySelfTest {
             "stored app version normalization should reject oversized numeric components"
         )
         try expect(
-            UpdateCheck.sanitizedReleaseURL("http://github.com/shlgd/SuperDictate/releases/tag/v9.8.7",
+            UpdateCheck.sanitizedReleaseURL("http://github.com/Aliwers/Planetka/releases/tag/v9.8.7",
                                             expectedTag: "v9.8.7"),
             equals: GITHUB_RELEASES_PAGE.absoluteString,
             "release URL sanitizing should require HTTPS"
         )
         try expect(
-            UpdateCheck.sanitizedReleaseURL("https://user@github.com/shlgd/SuperDictate/releases/tag/v9.8.7",
+            UpdateCheck.sanitizedReleaseURL("https://user@github.com/Aliwers/Planetka/releases/tag/v9.8.7",
                                             expectedTag: "v9.8.7"),
             equals: GITHUB_RELEASES_PAGE.absoluteString,
             "release URL sanitizing should reject userinfo"
         )
         try expect(
-            UpdateCheck.sanitizedReleaseURL("https://github.com/shlgd/SuperDictate/releases/tag/v9.8.7?download=1",
+            UpdateCheck.sanitizedReleaseURL("https://github.com/Aliwers/Planetka/releases/tag/v9.8.7?download=1",
                                             expectedTag: "v9.8.7"),
             equals: GITHUB_RELEASES_PAGE.absoluteString,
             "release URL sanitizing should reject query strings"
@@ -20170,8 +20631,8 @@ private enum ParakeySelfTest {
         )
         let updateEnv = updateProcessEnvironment(current: [
             "LANG": "C\nbad",
-            "USER": "parakey-user",
-            "LOGNAME": "parakey-logname",
+            "USER": "planetka-user",
+            "LOGNAME": "planetka-logname",
             "__CF_USER_TEXT_ENCODING": "0x1F5:0x0:0x0",
             "BASH_ENV": "/tmp/pwn.sh",
             "ENV": "/tmp/pwn.sh",
@@ -20186,9 +20647,9 @@ private enum ParakeySelfTest {
                    "update environment should use a deterministic PATH")
         try expect(updateEnv["LANG"], equals: Optional("en_US.UTF-8"),
                    "update environment should reject unsafe locale values")
-        try expect(updateEnv["USER"], equals: Optional("parakey-user"),
+        try expect(updateEnv["USER"], equals: Optional("planetka-user"),
                    "update environment should preserve a safe USER value")
-        try expect(updateEnv["LOGNAME"], equals: Optional("parakey-logname"),
+        try expect(updateEnv["LOGNAME"], equals: Optional("planetka-logname"),
                    "update environment should preserve a safe LOGNAME value")
         for key in ["BASH_ENV", "ENV", "SHELLOPTS", "RUBYOPT", "HOMEBREW_BOTTLE_DOMAIN"] {
             try expect(updateEnv[key], equals: String?.none,
@@ -20196,7 +20657,7 @@ private enum ParakeySelfTest {
         }
         let systemEnv = systemToolProcessEnvironment(current: [
             "LANG": "en_GB.UTF-8",
-            "USER": "parakey-user",
+            "USER": "planetka-user",
             "BASH_ENV": "/tmp/pwn.sh",
             "DYLD_INSERT_LIBRARIES": "/tmp/pwn.dylib",
             "PATH": "/tmp/bin",
@@ -20205,7 +20666,7 @@ private enum ParakeySelfTest {
                    "system tool environment should not include Homebrew or inherited PATH entries")
         try expect(systemEnv["LANG"], equals: Optional("en_GB.UTF-8"),
                    "system tool environment should preserve a safe locale")
-        try expect(systemEnv["USER"], equals: Optional("parakey-user"),
+        try expect(systemEnv["USER"], equals: Optional("planetka-user"),
                    "system tool environment should preserve a safe USER value")
         for key in ["BASH_ENV", "DYLD_INSERT_LIBRARIES"] {
             try expect(systemEnv[key], equals: String?.none,
@@ -20215,27 +20676,27 @@ private enum ParakeySelfTest {
         let script = updateHelperScript(pid: 123,
                                         brewPath: "/opt/homebrew/bin/brew",
                                         targetVersion: "9.8.7",
-                                        statePath: "/tmp/parakey-update.state",
-                                        appPath: "/Applications/SuperDictate.app",
+                                        statePath: "/tmp/planetka-update.state",
+                                        appPath: "/Applications/Planetka.app",
                                         releasesPageURL: "https://example.test/releases")
         for fragment in [
             "umask 077",
             "TARGET_VERSION='9.8.7'",
-            "STATE_PATH='/tmp/parakey-update.state'",
-            "PARAKEY_PID=123",
+            "STATE_PATH='/tmp/planetka-update.state'",
+            "PLANETKA_PID=123",
             "SCRIPT_PATH=\"$0\"",
             "trap cleanup EXIT",
             "/bin/rm -f \"$SCRIPT_PATH\"",
             "printf '[%s] %s\\n' \"$(timestamp)\" \"$*\"",
             "printf '%s\\t%s\\n' \"$phase\" \"$message\" >\"$tmp\"",
-            "CASK_TAP='shlgd/superdictate'",
-            "CASK_TOKEN='shlgd/superdictate/superdictate'",
-            "CASK_INSTALLED_TOKEN='parakey'",
+            "CASK_TAP='Aliwers/planetka'",
+            "CASK_TOKEN='Aliwers/planetka/planetka'",
+            "CASK_INSTALLED_TOKEN='planetka'",
             "PlistBuddy -c \"Print :CFBundleShortVersionString\"",
             "version_at_least \"$installed\" \"$TARGET_VERSION\"",
-            "state \"preparing\" \"Preparing Homebrew for Parakey v$TARGET_VERSION...\"",
-            "state \"downloading\" \"Downloading Parakey v$TARGET_VERSION...\"",
-            "state \"installing\" \"Installing Parakey v$TARGET_VERSION...\"",
+            "state \"preparing\" \"Preparing Homebrew for Planetka v$TARGET_VERSION...\"",
+            "state \"downloading\" \"Downloading Planetka v$TARGET_VERSION...\"",
+            "state \"installing\" \"Installing Planetka v$TARGET_VERSION...\"",
             "run_brew tap \"$CASK_TAP\"",
             "run_brew update --force",
             "run_brew fetch --cask --force \"$CASK_TOKEN\"",
@@ -20243,7 +20704,7 @@ private enum ParakeySelfTest {
             "run_brew reinstall --cask --force --appdir=\"$APP_DIR\" \"$CASK_TOKEN\"",
             "installed_target_version",
             "sleep 2",
-            "state \"complete\" \"Parakey v$TARGET_VERSION is installed.\"",
+            "state \"complete\" \"Planetka v$TARGET_VERSION is installed.\"",
             "/usr/bin/open \"$APP_PATH\""
         ] {
             guard script.contains(fragment) else {
@@ -20256,35 +20717,35 @@ private enum ParakeySelfTest {
             }
         }
 
-        let directScript = superDictateDirectUpdateHelperScript(
+        let directScript = planetkaDirectUpdateHelperScript(
             pid: 123,
             targetVersion: "9.8.7",
-            statePath: "/tmp/superdictate-update.state",
-            stagedAppPath: "/tmp/work/release/SuperDictate.app",
+            statePath: "/tmp/planetka-update.state",
+            stagedAppPath: "/tmp/work/release/Planetka.app",
             workDirectory: "/tmp/work",
-            backupAppPath: "/Applications/.SuperDictate-update-backup-test.app",
-            appPath: "/Applications/SuperDictate.app",
+            backupAppPath: "/Applications/.Planetka-update-backup-test.app",
+            appPath: "/Applications/Planetka.app",
             language: .english
         )
         for fragment in [
             "PANEL_PID=123",
             "TARGET_VERSION='9.8.7'",
-            "STAGED_APP='/tmp/work/release/SuperDictate.app'",
-            "BACKUP_APP='/Applications/.SuperDictate-update-backup-test.app'",
+            "STAGED_APP='/tmp/work/release/Planetka.app'",
+            "BACKUP_APP='/Applications/.Planetka-update-backup-test.app'",
             "wait_for_panel_exit || rollback",
             "launchctl bootout \"$SERVICE\"",
             "/bin/mv \"$APP_PATH\" \"$BACKUP_APP\" || rollback",
             "/usr/bin/ditto \"$STAGED_APP\" \"$APP_PATH\" || rollback",
             "/usr/bin/codesign --verify --deep --strict \"$APP_PATH\"",
             "if [ -d \"$BACKUP_APP\" ]; then",
-            "state \"complete\" 'SuperDictate v9.8.7 is installed.'",
+            "state \"complete\" 'Planetka v9.8.7 is installed.'",
         ] {
             guard directScript.contains(fragment) else {
                 throw SelfTestFailure.failed("direct update helper missing fragment: \(fragment)")
             }
         }
         let directTmp = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("superdictate-direct-update-self-test-\(UUID().uuidString).sh")
+            .appendingPathComponent("planetka-direct-update-self-test-\(UUID().uuidString).sh")
         try directScript.write(to: directTmp, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: directTmp) }
         let directProc = Process()
@@ -20299,7 +20760,7 @@ private enum ParakeySelfTest {
         }
 
         let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("parakey-update-self-test-\(UUID().uuidString).sh")
+            .appendingPathComponent("planetka-update-self-test-\(UUID().uuidString).sh")
         try script.write(to: tmp, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: tmp) }
 
@@ -20316,7 +20777,7 @@ private enum ParakeySelfTest {
 
         let fm = FileManager.default
         let helperRoot = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("parakey-update-helper-test-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("planetka-update-helper-test-\(UUID().uuidString)", isDirectory: true)
         try fm.createDirectory(at: helperRoot, withIntermediateDirectories: false)
         defer { try? fm.removeItem(at: helperRoot) }
 
@@ -20380,7 +20841,7 @@ private enum ParakeySelfTest {
             "update helper script writer should leave symlink targets untouched"
         )
 
-        let preferredLog = helperRoot.appendingPathComponent("SuperDictate-update.log")
+        let preferredLog = helperRoot.appendingPathComponent("Planetka-update.log")
         let helperLog = try openPrivateUpdateHelperLog(preferredPath: preferredLog.path,
                                                        fallbackDirectory: helperRoot.path)
         helperLog.handle.write(Data("log\n".utf8))
@@ -20444,15 +20905,15 @@ private enum ParakeySelfTest {
     private static func testDirectUpdateReplacement() throws {
         let fileManager = FileManager.default
         let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("superdictate-update-replacement-test-\(UUID().uuidString)",
+            .appendingPathComponent("planetka-update-replacement-test-\(UUID().uuidString)",
                                     isDirectory: true)
         let applications = root.appendingPathComponent("Applications", isDirectory: true)
-        let currentApp = applications.appendingPathComponent("SuperDictate.app", isDirectory: true)
+        let currentApp = applications.appendingPathComponent("Planetka.app", isDirectory: true)
         let workDirectory = root.appendingPathComponent("work", isDirectory: true)
         let stagedApp = workDirectory
             .appendingPathComponent("release", isDirectory: true)
-            .appendingPathComponent("SuperDictate.app", isDirectory: true)
-        let backupApp = applications.appendingPathComponent(".SuperDictate-update-backup.app",
+            .appendingPathComponent("Planetka.app", isDirectory: true)
+        let backupApp = applications.appendingPathComponent(".Planetka-update-backup.app",
                                                              isDirectory: true)
         let statePath = root.appendingPathComponent("state.txt")
         let helperPath = root.appendingPathComponent("helper.sh")
@@ -20462,7 +20923,7 @@ private enum ParakeySelfTest {
         try Data("starting\tStarting update…\n".utf8).write(to: statePath)
         defer { try? fileManager.removeItem(at: root) }
 
-        let script = superDictateDirectUpdateHelperScript(
+        let script = planetkaDirectUpdateHelperScript(
             pid: Int32.max,
             targetVersion: "9.8.7",
             statePath: statePath.path,
@@ -20471,7 +20932,7 @@ private enum ParakeySelfTest {
             backupAppPath: backupApp.path,
             appPath: currentApp.path,
             language: .english,
-            agentLabel: "com.local.superdictate.self-test.\(UUID().uuidString)",
+            agentLabel: "com.local.planetka.self-test.\(UUID().uuidString)",
             relaunch: false
         )
         try script.write(to: helperPath, atomically: true, encoding: .utf8)
@@ -20489,7 +20950,7 @@ private enum ParakeySelfTest {
             throw SelfTestFailure.failed("direct update replacement failed: \(processOutput)")
         }
 
-        try SuperDictateUpdateInstaller.validateApp(at: currentApp,
+        try PlanetkaUpdateInstaller.validateApp(at: currentApp,
                                                      expectedVersion: "9.8.7")
         try expect(fileManager.fileExists(atPath: backupApp.path), equals: false,
                    "successful direct update should remove its backup")
@@ -20508,14 +20969,14 @@ private enum ParakeySelfTest {
         let fileManager = FileManager.default
         let executableDirectory = appURL.appendingPathComponent("Contents/MacOS", isDirectory: true)
         try fileManager.createDirectory(at: executableDirectory, withIntermediateDirectories: true)
-        let executableURL = executableDirectory.appendingPathComponent("SuperDictate")
+        let executableURL = executableDirectory.appendingPathComponent("Planetka")
         try fileManager.copyItem(at: sourceExecutable, to: executableURL)
         try fileManager.setAttributes([.posixPermissions: 0o755],
                                       ofItemAtPath: executableURL.path)
         let info: [String: Any] = [
-            "CFBundleExecutable": "SuperDictate",
-            "CFBundleIdentifier": "com.local.superdictate",
-            "CFBundleName": "SuperDictate",
+            "CFBundleExecutable": "Planetka",
+            "CFBundleIdentifier": "com.local.planetka",
+            "CFBundleName": "Planetka",
             "CFBundlePackageType": "APPL",
             "CFBundleShortVersionString": version,
             "CFBundleVersion": "1",
@@ -20524,7 +20985,7 @@ private enum ParakeySelfTest {
                                                           format: .xml,
                                                           options: 0)
         try infoData.write(to: appURL.appendingPathComponent("Contents/Info.plist"))
-        let signing = SuperDictateAgentService.run("/usr/bin/codesign",
+        let signing = PlanetkaAgentService.run("/usr/bin/codesign",
                                                    ["--force", "--deep", "--sign", "-", appURL.path])
         guard signing.status == 0 else {
             throw SelfTestFailure.failed("could not sign synthetic update app: \(signing.output)")
@@ -20534,8 +20995,8 @@ private enum ParakeySelfTest {
     private static func testUpdateProgressState() throws {
         let launch = UpdateProgressLaunch(arguments: [
             UPDATE_PROGRESS_ARGUMENT,
-            "/tmp/parakey.state",
-            "/tmp/parakey.log",
+            "/tmp/planetka.state",
+            "/tmp/planetka.log",
             "9.8.7",
             "/tmp/\(UPDATE_PROGRESS_APP_PREFIX)test.app",
         ])
@@ -20544,7 +21005,7 @@ private enum ParakeySelfTest {
         try expect(launch?.targetVersion, equals: Optional("9.8.7"),
                    "update progress launch should retain target version")
         try expect(
-            UpdateProgressLaunch(arguments: [UPDATE_PROGRESS_ARGUMENT, "", "/tmp/parakey.log", "9.8.7", "/tmp/app"]) != nil,
+            UpdateProgressLaunch(arguments: [UPDATE_PROGRESS_ARGUMENT, "", "/tmp/planetka.log", "9.8.7", "/tmp/app"]) != nil,
             equals: false,
             "update progress launch should reject empty paths"
         )
@@ -20582,10 +21043,10 @@ private enum ParakeySelfTest {
             .appendingPathComponent("\(UPDATE_PROGRESS_APP_PREFIX)test.app")
         try expect(isSafeUpdateProgressCleanupPath(safeCleanupPath), equals: true,
                    "update progress cleanup should allow copied temp app bundles")
-        try expect(isSafeUpdateProgressCleanupPath("/Applications/SuperDictate.app"), equals: false,
+        try expect(isSafeUpdateProgressCleanupPath("/Applications/Planetka.app"), equals: false,
                    "update progress cleanup should reject non-temp app bundles")
         let unsafeTempPath = (NSTemporaryDirectory() as NSString)
-            .appendingPathComponent("Parakey.app")
+            .appendingPathComponent("Planetka.app")
         try expect(isSafeUpdateProgressCleanupPath(unsafeTempPath), equals: false,
                    "update progress cleanup should reject temp app bundles without the copied-helper prefix")
     }
@@ -20722,7 +21183,7 @@ private enum ParakeySelfTest {
         )
 
         let recoveryURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("superdictate-recovery-test-\(UUID().uuidString)")
+            .appendingPathComponent("planetka-recovery-test-\(UUID().uuidString)")
             .appendingPathExtension("sdaudio")
         defer { try? FileManager.default.removeItem(at: recoveryURL) }
         let expectedSamples: [Float] = [-0.75, -0.125, 0, 0.25, 0.875]
@@ -20756,12 +21217,12 @@ private enum ParakeySelfTest {
 
         let processed = processedDictationText(
             rawTranscript: "  Um, parakeet is fast.  ",
-            corrections: [TranscriptCorrection(source: "parakeet", replacement: "Parakey")],
+            corrections: [TranscriptCorrection(source: "parakeet", replacement: "Planetka")],
             removeFillerWords: true
         )
         try expect(
             processed,
-            equals: DictationTextProcessingResult(text: "Parakey is fast.",
+            equals: DictationTextProcessingResult(text: "Planetka is fast.",
                                                   appliedCorrectionCount: 1,
                                                   removedFillerWordCount: 1),
             "dictation text processing should trim, apply corrections, then remove fillers"
@@ -20769,12 +21230,12 @@ private enum ParakeySelfTest {
 
         let preservedFillers = processedDictationText(
             rawTranscript: "  Um, parakeet is fast.  ",
-            corrections: [TranscriptCorrection(source: "parakeet", replacement: "Parakey")],
+            corrections: [TranscriptCorrection(source: "parakeet", replacement: "Planetka")],
             removeFillerWords: false
         )
         try expect(
             preservedFillers,
-            equals: DictationTextProcessingResult(text: "Um, Parakey is fast.",
+            equals: DictationTextProcessingResult(text: "Um, Planetka is fast.",
                                                   appliedCorrectionCount: 1,
                                                   removedFillerWordCount: 0),
             "dictation text processing should preserve fillers when the setting is off"
@@ -20987,7 +21448,7 @@ private enum ParakeySelfTest {
 
         let fm = FileManager.default
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("parakey-mute-marker-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("planetka-mute-marker-\(UUID().uuidString)", isDirectory: true)
         try fm.createDirectory(at: root, withIntermediateDirectories: false)
         defer { try? fm.removeItem(at: root) }
 
@@ -21737,6 +22198,128 @@ private enum ParakeySelfTest {
         )
     }
 
+    private static func testHoldOrDoubleTapHoldStopsOnRelease() throws {
+        var state = HotkeyTransitionState()
+        let fn = hotkeyChoice(forKeycode: 96)
+
+        try expect(
+            state.transition(for: event(.keyDown, keycode: fn.keycode, timestamp: 100),
+                             hotkey: fn, triggerMode: .holdOrDoubleTap, isRecording: false),
+            equals: HotkeyTransitionResult(suppress: true, actions: [.press]),
+            "press should start recording immediately, same as hold mode"
+        )
+        // Held well past the tap threshold — a deliberate push-to-talk.
+        try expect(
+            state.transition(for: event(.keyUp, keycode: fn.keycode, timestamp: 100 + HOTKEY_TAP_MAX_HOLD_DURATION + 0.5),
+                             hotkey: fn, triggerMode: .holdOrDoubleTap, isRecording: true),
+            equals: HotkeyTransitionResult(suppress: true, actions: [.release]),
+            "releasing after a real hold should stop immediately, with no double-tap grace period"
+        )
+    }
+
+    private static func testHoldOrDoubleTapDoubleTapLatchesHandsFree() throws {
+        var state = HotkeyTransitionState()
+        let fn = hotkeyChoice(forKeycode: 96)
+
+        _ = state.transition(for: event(.keyDown, keycode: fn.keycode, timestamp: 100),
+                             hotkey: fn, triggerMode: .holdOrDoubleTap, isRecording: false)
+        // Quick release — ambiguous, so recording must NOT stop yet.
+        try expect(
+            state.transition(for: event(.keyUp, keycode: fn.keycode, timestamp: 100.1),
+                             hotkey: fn, triggerMode: .holdOrDoubleTap, isRecording: true),
+            equals: HotkeyTransitionResult(suppress: true, actions: [], armDoubleTapGraceTimer: true),
+            "a quick tap-release should defer the stop and arm the double-tap grace timer"
+        )
+        // Second tap inside the window confirms hands-free. Recording
+        // never stopped, so no new .press is needed.
+        try expect(
+            state.transition(for: event(.keyDown, keycode: fn.keycode, timestamp: 100.2),
+                             hotkey: fn, triggerMode: .holdOrDoubleTap, isRecording: true),
+            equals: HotkeyTransitionResult(suppress: true, actions: []),
+            "second tap should latch hands-free without restarting the recording"
+        )
+        try expect(
+            state.transition(for: event(.keyUp, keycode: fn.keycode, timestamp: 100.3),
+                             hotkey: fn, triggerMode: .holdOrDoubleTap, isRecording: true),
+            equals: .suppressOnly,
+            "releases while hands-free should be no-ops"
+        )
+        try expect(
+            state.transition(for: event(.keyDown, keycode: fn.keycode, timestamp: 105),
+                             hotkey: fn, triggerMode: .holdOrDoubleTap, isRecording: true),
+            equals: HotkeyTransitionResult(suppress: true, actions: [.release]),
+            "the next press while hands-free should stop the recording"
+        )
+    }
+
+    private static func testHoldOrDoubleTapSingleTapResolvesToStop() throws {
+        var state = HotkeyTransitionState()
+        let fn = hotkeyChoice(forKeycode: 96)
+
+        _ = state.transition(for: event(.keyDown, keycode: fn.keycode, timestamp: 100),
+                             hotkey: fn, triggerMode: .holdOrDoubleTap, isRecording: false)
+        _ = state.transition(for: event(.keyUp, keycode: fn.keycode, timestamp: 100.1),
+                             hotkey: fn, triggerMode: .holdOrDoubleTap, isRecording: true)
+
+        try expect(
+            state.resolvePendingTap(now: 100.1 + HOTKEY_DOUBLE_TAP_WINDOW / 2),
+            equals: nil,
+            "the grace timer must not resolve before the double-tap window elapses"
+        )
+        try expect(
+            state.resolvePendingTap(now: 100.1 + HOTKEY_DOUBLE_TAP_WINDOW),
+            equals: .release,
+            "with no second tap, the deferred stop should resolve once the window elapses"
+        )
+        try expect(
+            state.resolvePendingTap(now: 100.1 + HOTKEY_DOUBLE_TAP_WINDOW + 1),
+            equals: nil,
+            "an already-resolved tap must not stop the recording twice"
+        )
+    }
+
+    /// Fn is the default hotkey and, being a modifier, travels the
+    /// flagsChanged branch rather than keyDown/keyUp — the branch the
+    /// other holdOrDoubleTap tests (F5) never exercise.
+    private static func testHoldOrDoubleTapWorksWithFnModifier() throws {
+        var state = HotkeyTransitionState()
+        let fn = hotkeyChoice(forKeycode: FN_KEYCODE)
+        let fnDown = CGEventFlags.maskSecondaryFn.rawValue
+
+        try expect(
+            state.transition(for: event(.flagsChanged, keycode: FN_KEYCODE, flags: fnDown, timestamp: 100),
+                             hotkey: fn, triggerMode: .holdOrDoubleTap, isRecording: false),
+            equals: HotkeyTransitionResult(suppress: true, actions: [.press]),
+            "pressing Fn should start recording"
+        )
+        try expect(
+            state.transition(for: event(.flagsChanged, keycode: FN_KEYCODE, flags: 0, timestamp: 100.1),
+                             hotkey: fn, triggerMode: .holdOrDoubleTap, isRecording: true),
+            equals: HotkeyTransitionResult(suppress: true, actions: [], armDoubleTapGraceTimer: true),
+            "a quick Fn tap-release should defer the stop"
+        )
+        try expect(
+            state.transition(for: event(.flagsChanged, keycode: FN_KEYCODE, flags: fnDown, timestamp: 100.2),
+                             hotkey: fn, triggerMode: .holdOrDoubleTap, isRecording: true),
+            equals: HotkeyTransitionResult(suppress: true, actions: []),
+            "a second Fn tap should latch hands-free"
+        )
+        // A modifier always reports its release too; omitting it would
+        // leave the state machine believing Fn is still held.
+        try expect(
+            state.transition(for: event(.flagsChanged, keycode: FN_KEYCODE, flags: 0, timestamp: 100.3),
+                             hotkey: fn, triggerMode: .holdOrDoubleTap, isRecording: true),
+            equals: .suppressOnly,
+            "lifting Fn after the second tap should be a no-op while hands-free"
+        )
+        try expect(
+            state.transition(for: event(.flagsChanged, keycode: FN_KEYCODE, flags: fnDown, timestamp: 105),
+                             hotkey: fn, triggerMode: .holdOrDoubleTap, isRecording: true),
+            equals: HotkeyTransitionResult(suppress: true, actions: [.release]),
+            "the next Fn press while hands-free should stop the recording"
+        )
+    }
+
     private static func testEscapePassesThroughWhenNotRecording() throws {
         var state = HotkeyTransitionState()
         let f5 = hotkeyChoice(forKeycode: 96)
@@ -21788,13 +22371,15 @@ private enum ParakeySelfTest {
         _ type: CGEventType,
         keycode: CGKeyCode,
         flags: UInt64 = 0,
-        isAutoRepeat: Bool = false
+        isAutoRepeat: Bool = false,
+        timestamp: TimeInterval = 0
     ) -> HotkeyEventSnapshot {
         HotkeyEventSnapshot(
             typeRawValue: type.rawValue,
             keycode: keycode,
             flagsRawValue: flags,
-            isAutoRepeat: isAutoRepeat
+            isAutoRepeat: isAutoRepeat,
+            timestamp: timestamp
         )
     }
 
@@ -21809,7 +22394,7 @@ private enum ParakeySelfTest {
     }
 }
 
-if let status = ParakeySelfTest.run(arguments: Array(CommandLine.arguments.dropFirst())) {
+if let status = PlanetkaSelfTest.run(arguments: Array(CommandLine.arguments.dropFirst())) {
     exit(status)
 }
 #endif
@@ -21897,7 +22482,7 @@ private final class SettingsDocumentView: NSView {
 }
 
 @MainActor
-private final class SuperDictateControlPanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
+private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var window: NSWindow?
     private var settingsWindow: NSWindow?
     private var refreshTimer: Timer?
@@ -21918,8 +22503,8 @@ private final class SuperDictateControlPanelApp: NSObject, NSApplicationDelegate
     private var language: InterfaceLanguage { settings.interfaceLanguage }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        guard SuperDictateControlPanelRegistry.claimCurrentPanel() else {
-            _ = SuperDictateControlPanelRegistry.activateExistingPanelIfPresent()
+        guard PlanetkaControlPanelRegistry.claimCurrentPanel() else {
+            _ = PlanetkaControlPanelRegistry.activateExistingPanelIfPresent()
             NSApp.terminate(nil)
             return
         }
@@ -21927,7 +22512,7 @@ private final class SuperDictateControlPanelApp: NSObject, NSApplicationDelegate
         showWindow()
         startRefreshTimer()
         checkForUpdates()
-        if settings.agentEnabled && !SuperDictateAgentService.isAgentLoadedOrRunning() {
+        if settings.agentEnabled && !PlanetkaAgentService.isAgentLoadedOrRunning() {
             beginServiceOperation(.starting)
         }
     }
@@ -21946,7 +22531,7 @@ private final class SuperDictateControlPanelApp: NSObject, NSApplicationDelegate
         refreshTimer = nil
         updateTask?.cancel()
         updateTask = nil
-        SuperDictateControlPanelRegistry.clearCurrentPanel()
+        PlanetkaControlPanelRegistry.clearCurrentPanel()
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -21986,7 +22571,7 @@ private final class SuperDictateControlPanelApp: NSObject, NSApplicationDelegate
                               styleMask: [.titled, .closable, .miniaturizable],
                               backing: .buffered,
                               defer: false)
-        window.title = "SuperDictate"
+        window.title = "Planetka"
         window.contentMinSize = NSSize(width: 520, height: 310)
         window.contentMaxSize = NSSize(width: 520, height: 310)
         window.isReleasedWhenClosed = false
@@ -22018,17 +22603,17 @@ private final class SuperDictateControlPanelApp: NSObject, NSApplicationDelegate
         guard force || fingerprint != lastRenderFingerprint else { return }
         lastRenderFingerprint = fingerprint
         resizeCompactPanel(window)
-        window.title = t("SuperDictate — панель управления", "SuperDictate — Control Panel")
+        window.title = t("Planetka — панель управления", "Planetka — Control Panel")
         window.contentView = makeContentView()
         if let settingsWindow, settingsWindow.isVisible {
-            settingsWindow.title = t("Настройки SuperDictate", "SuperDictate Settings")
+            settingsWindow.title = t("Настройки Planetka", "Planetka Settings")
         }
     }
 
     private func resizeCompactPanel(_ window: NSWindow) {
         let missingCount = Permission.allCases.filter { !Permissions.isGranted($0) }.count
         let state = AgentRuntimeStateStore.read()
-        let showsModelProgress = SuperDictateAgentService.isAgentRunning()
+        let showsModelProgress = PlanetkaAgentService.isAgentRunning()
             && state?.status == "starting"
             && state?.modelDownloadPhase != nil
         let modelProgressHeight = showsModelProgress ? 26 : 0
@@ -22086,7 +22671,7 @@ private final class SuperDictateControlPanelApp: NSObject, NSApplicationDelegate
         return [language.rawValue,
                 serviceOperation?.rawValue ?? "idle",
                 updateStateFingerprint(),
-                SuperDictateAgentService.isAgentRunning() ? "running" : "stopped",
+                PlanetkaAgentService.isAgentRunning() ? "running" : "stopped",
                 stateToken,
                 permissions,
                 settings.configuredHotkey.name,
@@ -22292,7 +22877,7 @@ private final class SuperDictateControlPanelApp: NSObject, NSApplicationDelegate
         text.orientation = .vertical
         text.alignment = .leading
         text.spacing = 1
-        text.addArrangedSubview(panelLabel("SuperDictate", size: 20, weight: .semibold))
+        text.addArrangedSubview(panelLabel("Planetka", size: 20, weight: .semibold))
         text.addArrangedSubview(panelLabel(
             t("Локальная диктовка · работает в фоне", "Local dictation · runs in the background"),
             size: 11.5,
@@ -22301,7 +22886,7 @@ private final class SuperDictateControlPanelApp: NSObject, NSApplicationDelegate
 
         let version = panelLabel("v\(currentBundleVersion())", size: 11, color: .tertiaryLabelColor)
         version.setContentHuggingPriority(.required, for: .horizontal)
-        version.toolTip = t("Установленная версия SuperDictate", "Installed SuperDictate version")
+        version.toolTip = t("Установленная версия Planetka", "Installed Planetka version")
 
         let languageControl = NSSegmentedControl(labels: ["RU", "EN"],
                                                  trackingMode: .selectOne,
@@ -22352,7 +22937,7 @@ private final class SuperDictateControlPanelApp: NSObject, NSApplicationDelegate
     }
 
     private func compactServiceCard() -> NSView {
-        let running = SuperDictateAgentService.isAgentRunning()
+        let running = PlanetkaAgentService.isAgentRunning()
         let state = AgentRuntimeStateStore.read()
         let presentation = servicePresentation(running: running, state: state)
         let card = compactCard()
@@ -22504,8 +23089,8 @@ private final class SuperDictateControlPanelApp: NSObject, NSApplicationDelegate
                 size: 11,
                 color: .secondaryLabelColor
             )
-            ready.toolTip = t("SuperDictate получил все три необходимых разрешения macOS.",
-                              "SuperDictate has all three required macOS permissions.")
+            ready.toolTip = t("Planetka получил все три необходимых разрешения macOS.",
+                              "Planetka has all three required macOS permissions.")
             content.addArrangedSubview(ready)
         } else {
             for permission in missing {
@@ -22592,7 +23177,7 @@ private final class SuperDictateControlPanelApp: NSObject, NSApplicationDelegate
                     nil, nil, false, nil)
         case .upToDate:
             return ("checkmark.circle.fill", .systemGreen,
-                    t("SuperDictate актуален", "SuperDictate is up to date"),
+                    t("Planetka актуален", "Planetka is up to date"),
                     t("Установлена последняя версия v\(currentBundleVersion())",
                       "Latest version v\(currentBundleVersion()) is installed"),
                     t("Проверить", "Check"), #selector(updateButtonClicked(_:)), true,
@@ -22603,8 +23188,8 @@ private final class SuperDictateControlPanelApp: NSObject, NSApplicationDelegate
                     t("Скачается, проверится и установится автоматически",
                       "Downloads, verifies, and installs automatically"),
                     t("Обновить", "Update"), #selector(updateButtonClicked(_:)), serviceOperation == nil,
-                    t("Обновить SuperDictate до v\(release.version) одной кнопкой",
-                      "Update SuperDictate to v\(release.version) with one click"))
+                    t("Обновить Planetka до v\(release.version) одной кнопкой",
+                      "Update Planetka to v\(release.version) with one click"))
         case .preparing(let version, let phase):
             return ("arrow.down.circle", .systemBlue,
                     t("Обновляю до v\(version)", "Updating to v\(version)"),
@@ -22741,7 +23326,7 @@ private final class SuperDictateControlPanelApp: NSObject, NSApplicationDelegate
         case .httpStatus(let code):
             return "GitHub вернул ошибку HTTP \(code). Повторите попытку позже."
         case .unexpectedResponse:
-            return "GitHub вернул ответ, который SuperDictate не смог проверить."
+            return "GitHub вернул ответ, который Planetka не смог проверить."
         }
     }
 
@@ -22757,7 +23342,7 @@ private final class SuperDictateControlPanelApp: NSObject, NSApplicationDelegate
         updateTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let manifest = try await SuperDictateUpdateInstaller.fetchManifest(
+                let manifest = try await PlanetkaUpdateInstaller.fetchManifest(
                     expectedVersion: version
                 )
                 guard !Task.isCancelled else { return }
@@ -22767,7 +23352,7 @@ private final class SuperDictateControlPanelApp: NSObject, NSApplicationDelegate
                                   "Downloading the archive and verifying SHA-256…")
                 )
                 self.refresh(force: true)
-                let prepared = try await SuperDictateUpdateInstaller.prepare(manifest: manifest)
+                let prepared = try await PlanetkaUpdateInstaller.prepare(manifest: manifest)
                 guard !Task.isCancelled else {
                     try? FileManager.default.removeItem(at: prepared.workDirectory)
                     return
@@ -22781,7 +23366,7 @@ private final class SuperDictateControlPanelApp: NSObject, NSApplicationDelegate
                 try self.launchPreparedUpdate(prepared)
             } catch {
                 self.updateTask = nil
-                let message = (error as? SuperDictateUpdateInstallerError)?
+                let message = (error as? PlanetkaUpdateInstallerError)?
                     .message(language: self.language) ?? error.localizedDescription
                 self.updateState = .failed(message)
                 self.lastRenderFingerprint = ""
@@ -22790,14 +23375,14 @@ private final class SuperDictateControlPanelApp: NSObject, NSApplicationDelegate
         }
     }
 
-    private func launchPreparedUpdate(_ prepared: PreparedSuperDictateUpdate) throws {
+    private func launchPreparedUpdate(_ prepared: PreparedPlanetkaUpdate) throws {
         let statePath = try createPrivateUpdateProgressStateFile()
         let helperLog = try openPrivateUpdateHelperLog()
         let appURL = Bundle.main.bundleURL
         let backupURL = appURL.deletingLastPathComponent()
-            .appendingPathComponent(".SuperDictate-update-backup-\(UUID().uuidString).app",
+            .appendingPathComponent(".Planetka-update-backup-\(UUID().uuidString).app",
                                     isDirectory: true)
-        let script = superDictateDirectUpdateHelperScript(
+        let script = planetkaDirectUpdateHelperScript(
             pid: getpid(),
             targetVersion: prepared.version,
             statePath: statePath,
@@ -23331,8 +23916,8 @@ private final class SuperDictateControlPanelApp: NSObject, NSApplicationDelegate
             enabled: serviceOperation == nil && !dictationInProgress,
             toolTip: dictationInProgress
                 ? t("Сначала завершите текущую диктовку.", "Finish the current dictation first.")
-                : t("Отозвать разрешения SuperDictate после дополнительного подтверждения.",
-                    "Revoke SuperDictate permissions after an additional confirmation.")
+                : t("Отозвать разрешения Planetka после дополнительного подтверждения.",
+                    "Revoke Planetka permissions after an additional confirmation.")
         )
         reset.setContentHuggingPriority(.required, for: .horizontal)
 
@@ -23578,6 +24163,9 @@ private final class SuperDictateControlPanelApp: NSObject, NSApplicationDelegate
         switch settings.triggerMode {
         case .hold: return t("Удерживать", "Press and hold")
         case .toggle: return t("Нажать для старта и ещё раз для остановки", "Press to start, press again to stop")
+        case .holdOrDoubleTap:
+            return t("Удерживать, либо дважды нажать без удержания",
+                     "Hold, or double-tap without holding")
         }
     }
 
@@ -23845,11 +24433,11 @@ private final class SuperDictateControlPanelApp: NSObject, NSApplicationDelegate
                 do {
                     switch operation {
                     case .starting:
-                        try SuperDictateAgentService.installAndStart()
+                        try PlanetkaAgentService.installAndStart()
                     case .restarting:
-                        try SuperDictateAgentService.restart()
+                        try PlanetkaAgentService.restart()
                     case .stopping:
-                        SuperDictateAgentService.stop()
+                        PlanetkaAgentService.stop()
                     }
                     return nil
                 } catch {
@@ -23949,7 +24537,7 @@ private final class SuperDictateControlPanelApp: NSObject, NSApplicationDelegate
             backing: .buffered,
             defer: false
         )
-        settingsWindow.title = t("Настройки SuperDictate", "SuperDictate Settings")
+        settingsWindow.title = t("Настройки Planetka", "Planetka Settings")
         settingsWindow.contentMinSize = NSSize(width: 680, height: contentHeight)
         settingsWindow.contentMaxSize = NSSize(width: 680, height: contentHeight)
         settingsWindow.isReleasedWhenClosed = false
@@ -23990,7 +24578,7 @@ private final class SuperDictateControlPanelApp: NSObject, NSApplicationDelegate
             )
             return
         }
-        if SuperDictateAgentService.isAgentRunning(), state?.isReady != true {
+        if PlanetkaAgentService.isAgentRunning(), state?.isReady != true {
             showError(
                 title: t("Служба ещё запускается", "Service Is Still Starting"),
                 detail: t("Дождитесь статуса «Работает» и попробуйте изменить сочетание ещё раз.",
@@ -24352,8 +24940,8 @@ private final class SuperDictateControlPanelApp: NSObject, NSApplicationDelegate
 
         let confirmation = NSAlert()
         confirmation.alertStyle = .critical
-        confirmation.messageText = t("Сбросить разрешения SuperDictate?",
-                                     "Reset SuperDictate Permissions?")
+        confirmation.messageText = t("Сбросить разрешения Planetka?",
+                                     "Reset Planetka Permissions?")
         confirmation.informativeText = t(
             "Микрофон, Универсальный доступ и Мониторинг ввода будут отозваны. Используйте это только для восстановления сломанных разрешений; затем их нужно выдать заново.",
             "Microphone, Accessibility, and Input Monitoring access will be revoked. Use this only to recover stuck permissions; all three must then be granted again."
@@ -24427,7 +25015,7 @@ private func runAudioCaptureDiagnostic(arguments: [String]) -> Int32? {
           let duration = TimeInterval(arguments[2]),
           duration > 0,
           duration <= 15 else {
-        fputs("usage: SuperDictate --diagnose-audio-capture <device-uid|default> <seconds>\n",
+        fputs("usage: Planetka --diagnose-audio-capture <device-uid|default> <seconds>\n",
               stderr)
         return EXIT_FAILURE
     }
@@ -24461,11 +25049,12 @@ private func runAudioCaptureDiagnostic(arguments: [String]) -> Int32? {
 
 let app = NSApplication.shared
 let launchArguments = Array(CommandLine.arguments.dropFirst())
+LegacyRenameMigration.run()
 if let diagnosticResult = runAudioCaptureDiagnostic(arguments: launchArguments) {
     exit(diagnosticResult)
 } else if launchArguments.first == RECORDING_HUD_EXPORT_ARGUMENT {
     guard launchArguments.count == 2 else {
-        fputs("usage: SuperDictate --export-hud-animation <frames-directory>\n", stderr)
+        fputs("usage: Planetka --export-hud-animation <frames-directory>\n", stderr)
         exit(EXIT_FAILURE)
     }
     do {
@@ -24482,7 +25071,7 @@ if let diagnosticResult = runAudioCaptureDiagnostic(arguments: launchArguments) 
     app.run()
 } else if launchArguments.contains(AGENT_ARGUMENT) {
     app.setActivationPolicy(.accessory)
-    let delegate = ParakeyApp()
+    let delegate = PlanetkaApp()
     app.delegate = delegate
     // Refuse to start under a tampered launch environment that would
     // redirect FluidAudio's model download to an attacker-controlled host.
@@ -24491,7 +25080,7 @@ if let diagnosticResult = runAudioCaptureDiagnostic(arguments: launchArguments) 
     refuseHostileRegistryEnvironmentAndExit()
     app.run()
 } else {
-    let delegate = SuperDictateControlPanelApp()
+    let delegate = PlanetkaControlPanelApp()
     app.delegate = delegate
     app.run()
 }
