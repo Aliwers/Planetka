@@ -16,22 +16,28 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Any stable identity keeps the designated requirement constant across
+# rebuilds, which is what preserves the granted macOS permissions. An Apple
+# Development certificate is the ideal one; a self-signed code-signing
+# certificate works just as well locally. Ad-hoc is the only unusable case,
+# because its requirement is pinned to the hash of the binary.
 identity="${PLANETKA_SIGN_IDENTITY:-}"
 if [[ -z "$identity" && -d "$APP_PATH" ]]; then
     identity="$(codesign -dv --verbose=4 "$APP_PATH" 2>&1 \
-        | sed -n 's/^Authority=\(Apple Development:.*\)$/\1/p' \
+        | sed -n 's/^Authority=\(.*\)$/\1/p' \
         | head -n 1)"
 fi
 if [[ -z "$identity" ]]; then
     identity="$(security find-identity -v -p codesigning 2>/dev/null \
-        | sed -n 's/.*"\(Apple Development:.*\)"/\1/p' \
+        | sed -n 's/.*"\(.*\)"/\1/p' \
         | head -n 1)"
 fi
 if [[ -z "$identity" ]]; then
-    printf 'Planetka: no Apple Development signing identity was found.\n' >&2
+    printf 'Planetka: no code signing identity was found.\n' >&2
     printf 'Set PLANETKA_SIGN_IDENTITY explicitly; ad-hoc local installs are disabled because they reset macOS permissions.\n' >&2
     exit 1
 fi
+printf 'Planetka: signing with %s\n' "$identity"
 
 SIGN_IDENTITY="$identity" "$ROOT_DIR/scripts/build-app.sh" "$STAGED_APP"
 
@@ -42,7 +48,14 @@ identifier="$(codesign -d --verbose=4 "$STAGED_APP" 2>&1 \
     printf 'Planetka: unexpected bundle identifier: %s\n' "$identifier" >&2
     exit 1
 }
-if [[ -d "$APP_PATH" ]]; then
+# An ad-hoc installed bundle has nothing to preserve: its requirement is
+# pinned to the hash of that exact binary, so its permissions die at the next
+# rebuild anyway. Moving off it to a stable identity is the point.
+installed_is_adhoc=0
+if [[ -d "$APP_PATH" ]] && codesign -dv --verbose=4 "$APP_PATH" 2>&1 | grep -q '^Signature=adhoc'; then
+    installed_is_adhoc=1
+fi
+if [[ -d "$APP_PATH" && "$installed_is_adhoc" == "0" ]]; then
     installed_requirement="$(codesign -d -r- "$APP_PATH" 2>&1 | tail -n 1)"
     staged_requirement="$(codesign -d -r- "$STAGED_APP" 2>&1 | tail -n 1)"
     [[ "$installed_requirement" == "$staged_requirement" ]] || {
