@@ -107,10 +107,10 @@ let RECORDING_HUD_TRANSCRIBING_PHASE_SPEED: CGFloat = 10.2
 let SPEECH_LANGUAGE_PROBE_DELAY_SECONDS: TimeInterval = 1.2
 /// How often to ask again, so switching language mid-dictation recolours the
 /// capsule instead of keeping whatever the first words were.
-let SPEECH_LANGUAGE_PROBE_INTERVAL_SECONDS: TimeInterval = 1.3
+let SPEECH_LANGUAGE_PROBE_INTERVAL_SECONDS: TimeInterval = 0.9
 /// Only the tail of the recording is probed: a switch to English three
 /// sentences in would otherwise stay outvoted by all the Russian before it.
-let SPEECH_LANGUAGE_PROBE_WINDOW_SECONDS: Double = 2.6
+let SPEECH_LANGUAGE_PROBE_WINDOW_SECONDS: Double = 1.9
 let HOTKEY_CAPTURE_BEGIN_NOTIFICATION = Notification.Name("com.local.planetka.hotkey-capture-begin")
 let HOTKEY_CAPTURE_END_NOTIFICATION = Notification.Name("com.local.planetka.hotkey-capture-end")
 let SETTINGS_CHANGED_NOTIFICATION = Notification.Name("com.local.planetka.settings-changed")
@@ -9582,6 +9582,15 @@ private final class RecordingHUDView: NSView {
         }
     }
 
+    /// The level meter jumps between frames; the dot follows it through this
+    /// eased value so it glides instead of snapping.
+    private var smoothedLevel: CGFloat = 0
+
+    private func easedLevel(target: CGFloat) -> CGFloat {
+        smoothedLevel += (target - smoothedLevel) * 0.18
+        return smoothedLevel
+    }
+
     var phase: CGFloat = 0 {
         didSet {
             if oldValue != phase { needsDisplay = true }
@@ -9600,7 +9609,7 @@ private final class RecordingHUDView: NSView {
         guard reveal > 0.001 else { return }
 
         let clamped = CGFloat(max(0, min(1, level)))
-        let audio = pow(clamped, 0.82)
+        let audio = easedLevel(target: pow(clamped, 0.82))
         let settlePeak: CGFloat = 0.68
         let settleOvershoot: CGFloat = 0.10
         let grow: CGFloat
@@ -9668,7 +9677,9 @@ private final class RecordingHUDView: NSView {
         // of vision; here nothing moves unless the microphone hears something.
         let restRadius = 3.2 * visualScale
         let loudRadius = min(capsuleRect.height * 0.30, 9.0 * visualScale)
-        let breath = 1 + (0.045 * sin(phase * 0.85) * breathingReady)
+        // The phase runs fast because the old bars needed it; a breath at that
+        // rate is a flutter, so the dot takes a slow fraction of it.
+        let breath = 1 + (0.06 * sin(phase * 0.16) * breathingReady)
         let radius = (restRadius + ((loudRadius - restRadius) * audio)) * breath
         let center = NSPoint(x: bounds.midX, y: bounds.midY)
 
