@@ -1939,6 +1939,22 @@ func visibleRecordingLevel(rawLevel: Float) -> Float {
     return max(0, min(1, rawLevel))
 }
 
+/// Which colour the capsule wears. Kept out of the drawing code so the rule
+/// can be tested: once the language is known it holds through transcription
+/// too, otherwise the capsule flashed the user's transcribing colour on the
+/// way to the checkmark and read as a glitch.
+func recordingHUDAccent(mode: RecordingHUDMode,
+                        languageAccent: NSColor?,
+                        recordingColor: NSColor,
+                        transcribingColor: NSColor) -> NSColor {
+    switch mode {
+    case .recording:    return languageAccent ?? recordingColor
+    case .transcribing: return languageAccent ?? transcribingColor
+    case .finished:     return RECORDING_HUD_SUCCESS_COLOR
+    case .error:        return .systemYellow
+    }
+}
+
 func recordingHUDPhaseSpeed(mode: RecordingHUDMode, level: Float) -> CGFloat {
     switch mode {
     case .recording:
@@ -9596,8 +9612,8 @@ private final class RecordingHUDView: NSView {
         var capsuleWidth = (startDiameter + ((finalRect.width - startDiameter) * grow)) * liveScale
         let capsuleHeight = (startDiameter + ((finalRect.height - startDiameter) * grow)) * liveScale
         if mode == .finished {
-            // The capsule pulls in to a circle before the check is drawn, so
-            // the two motions read as one gesture rather than a swap.
+            // The background is on its way out, so the capsule pulls in to a
+            // square around the check rather than staying a wide pill.
             let collapse = smootherstep(0, 0.45, finishProgress)
             capsuleWidth += (capsuleHeight - capsuleWidth) * collapse
         }
@@ -9608,27 +9624,20 @@ private final class RecordingHUDView: NSView {
         let capsule = NSBezierPath(roundedRect: capsuleRect,
                                    xRadius: capsuleRect.height / 2,
                                    yRadius: capsuleRect.height / 2)
-        let palette = backgroundPalette(alpha: capsuleAlpha)
+        // The finished state fades its own background out: what stays is the
+        // green check on nothing.
+        let backgroundFade = mode == .finished
+            ? (1 - smootherstep(0, 0.55, finishProgress))
+            : 1
+        let palette = backgroundPalette(alpha: capsuleAlpha * backgroundFade)
         palette.fill.setFill()
         capsule.fill()
-        if mode == .finished {
-            // The capsule itself goes green as it collapses; the check is then
-            // knocked out of it in white.
-            let greenFade = smootherstep(0, 0.5, finishProgress)
-            RECORDING_HUD_SUCCESS_COLOR
-                .withAlphaComponent(capsuleAlpha * greenFade)
-                .setFill()
-            capsule.fill()
-        }
-        let accent: NSColor
-        switch mode {
-        case .transcribing: accent = transcribingColor
-        case .error:        accent = .systemYellow
-        case .finished:     accent = RECORDING_HUD_SUCCESS_COLOR
-        case .recording:    accent = languageAccent ?? recordingColor
-        }
+        let accent = recordingHUDAccent(mode: mode,
+                                        languageAccent: languageAccent,
+                                        recordingColor: recordingColor,
+                                        transcribingColor: transcribingColor)
         let vividAccent = accent
-        if showsCapsuleStroke {
+        if showsCapsuleStroke, backgroundFade > 0.001 {
             palette.stroke.setStroke()
             capsule.lineWidth = 1 * visualScale
             capsule.stroke()
@@ -9733,17 +9742,20 @@ private final class RecordingHUDView: NSView {
             path.line(to: NSPoint(x: points[1].x + (points[2].x - points[1].x) * t,
                                   y: points[1].y + (points[2].y - points[1].y) * t))
         }
-        path.lineWidth = max(1.8, min(rect.width, rect.height) * 0.11)
+        path.lineWidth = max(2.2, min(rect.width, rect.height) * 0.13)
         path.lineCapStyle = .round
         path.lineJoinStyle = .round
-        NSColor.white.withAlphaComponent(0.97).setStroke()
+        RECORDING_HUD_SUCCESS_COLOR.setStroke()
         path.stroke()
     }
 
     private func drawTranscribingWave(in capsuleRect: NSRect, alpha: CGFloat) {
         guard alpha > 0.001 else { return }
-        let recordingAccent = recordingColor
-        let transcribingAccent = transcribingColor
+        // With a language colour in hand both ends of the sweep are the same,
+        // so the bars keep moving but the colour never changes — the flash of
+        // the user's transcribing colour was reading as a bug.
+        let recordingAccent = languageAccent ?? recordingColor
+        let transcribingAccent = languageAccent ?? transcribingColor
         let barCount = 8
         let visualScale = self.visualScale
         let barWidth: CGFloat = 2.05 * visualScale
@@ -12962,7 +12974,6 @@ final class PlanetkaApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
               let view = recordingHUDView,
               recordingHUDPanel?.isVisible == true else { return false }
         recordingHUDTranscribingStartedAt = nil
-        view.languageAccent = nil
         view.finishProgress = 0
         view.mode = .finished
         recordingHUDFinishStartedAt = ProcessInfo.processInfo.systemUptime
@@ -20024,6 +20035,34 @@ private enum PlanetkaSelfTest {
 
         try expect(recordingHUDPhaseSpeed(mode: .finished, level: 1), equals: 0,
                    "the finished capsule is a still frame")
+
+        let red = try XCTUnwrapAccent(.russian)
+        let userRecording = NSColor.systemPink
+        let userTranscribing = NSColor.systemTeal
+        try expect(recordingHUDAccent(mode: .recording,
+                                      languageAccent: red,
+                                      recordingColor: userRecording,
+                                      transcribingColor: userTranscribing) == red,
+                   equals: true,
+                   "a detected language should colour the recording capsule")
+        try expect(recordingHUDAccent(mode: .transcribing,
+                                      languageAccent: red,
+                                      recordingColor: userRecording,
+                                      transcribingColor: userTranscribing) == red,
+                   equals: true,
+                   "the language colour must hold through transcription, not flash the other colour")
+        try expect(recordingHUDAccent(mode: .transcribing,
+                                      languageAccent: nil,
+                                      recordingColor: userRecording,
+                                      transcribingColor: userTranscribing) == userTranscribing,
+                   equals: true,
+                   "without a language the user's own transcribing colour still applies")
+        try expect(recordingHUDAccent(mode: .finished,
+                                      languageAccent: red,
+                                      recordingColor: userRecording,
+                                      transcribingColor: userTranscribing) == RECORDING_HUD_SUCCESS_COLOR,
+                   equals: true,
+                   "the checkmark is always green")
     }
 
     private static func XCTUnwrapAccent(_ language: SpeechLanguage) throws -> NSColor {
