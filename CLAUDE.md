@@ -31,7 +31,7 @@ codesign --verify --deep --strict ./dist/Planetka.app
 Suite names (`--self-test <name>`): `hotkey`, `readiness`, `paste`, `history`, `statistics`, `corrections`,
 `fillers`, `ai-cleanup`, `audio-level`, `audio-conversion`, `audio-input`, `model-status`, `audio-route`,
 `recording-lifecycle`, `power-state`, `model-integrity`, `update`, `hostile-env`, `logging`, `diagnostics`,
-`insertion-target`, `legacy-rename`, `speech-language`, `all`. Two live suites (`audio-input-live`, `insertion-target-live`) touch real hardware
+`insertion-target`, `legacy-rename`, `speech-language`, `sounds`, `all`. Two live suites (`audio-input-live`, `insertion-target-live`) touch real hardware
 and are excluded from `all`.
 
 CI (`.github/workflows/build.yml`) runs exactly `check.sh` → `--self-test all` → `build-app.sh` → installer +

@@ -8303,21 +8303,69 @@ private func systemAudioMuteWatchdogScript() -> String {
 
 // MARK: - Sounds
 //
-// Short system sounds: Tink on recording start, Pop after a
-// successful paste, Basso when a dictation is dropped. Loaded from
-// /System/Library/Sounds so we don't have to bundle audio resources.
+// Short system sounds: Purr on recording start, Bottle after a
+// successful paste, and a lowered Bottle when a dictation is dropped.
+// Chosen to be soft rather than attention-grabbing — they fire on every
+// dictation. Loaded from /System/Library/Sounds so we don't have to
+// bundle audio resources.
 
 @MainActor
 enum Sounds {
-    private static let start = systemSound("Tink", volume: 0.55)
-    private static let done = systemSound("Pop", volume: 0.45)
-    private static let error = systemSound("Basso", volume: 0.30)
+    private static let start = systemSound("Purr", volume: 0.45)
+    private static let done = systemSound("Bottle", volume: 0.40)
+    private static let error = pitchedSound("Bottle", rate: 0.7, volume: 0.35)
 
     private static func systemSound(_ name: String, volume: Float) -> NSSound? {
         let path = "/System/Library/Sounds/\(name).aiff"
         guard let sound = NSSound(contentsOfFile: path, byReference: true) else { return nil }
         sound.volume = volume
         return sound
+    }
+
+    /// NSSound cannot vary playback rate, so the darker error cue is rendered
+    /// once into the temporary directory: re-labelling the sample rate lowers
+    /// pitch and speed together, the way `afplay -r` does. Falls back to the
+    /// untouched system sound when rendering is unavailable.
+    private static func pitchedSound(_ name: String, rate: Double, volume: Float) -> NSSound? {
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("planetka-\(name.lowercased())-\(Int(rate * 100)).aiff")
+        guard renderPitchedSound(named: name, to: destination, rate: rate),
+              let sound = NSSound(contentsOf: destination, byReference: true)
+        else { return systemSound(name, volume: volume) }
+        sound.volume = volume
+        return sound
+    }
+
+    nonisolated static func renderPitchedSound(named name: String, to destination: URL, rate: Double) -> Bool {
+        let source = URL(fileURLWithPath: "/System/Library/Sounds/\(name).aiff")
+        guard rate > 0,
+              let input = try? AVAudioFile(forReading: source) else { return false }
+        let format = input.processingFormat
+        guard input.length > 0,
+              let original = AVAudioPCMBuffer(pcmFormat: format,
+                                              frameCapacity: AVAudioFrameCount(input.length)),
+              (try? input.read(into: original)) != nil,
+              let samples = original.floatChannelData,
+              let lowered = AVAudioFormat(standardFormatWithSampleRate: format.sampleRate * rate,
+                                          channels: format.channelCount),
+              let relabelled = AVAudioPCMBuffer(pcmFormat: lowered,
+                                                frameCapacity: original.frameLength),
+              let target = relabelled.floatChannelData else { return false }
+        let bytes = Int(original.frameLength) * MemoryLayout<Float>.size
+        for channel in 0..<Int(format.channelCount) {
+            memcpy(target[channel], samples[channel], bytes)
+        }
+        relabelled.frameLength = original.frameLength
+        try? FileManager.default.removeItem(at: destination)
+        guard let output = try? AVAudioFile(forWriting: destination, settings: [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: lowered.sampleRate,
+            AVNumberOfChannelsKey: lowered.channelCount,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: true
+        ]) else { return false }
+        return (try? output.write(from: relabelled)) != nil
     }
 
     static func playStart() { start?.stop(); start?.play() }
@@ -17537,6 +17585,8 @@ private enum PlanetkaSelfTest {
             return runSuite("insertion-target", testInsertionTargetTracking)
         case "legacy-rename":
             return runSuite("legacy-rename", testLegacyRenameMigration)
+        case "sounds":
+            return runSuite("sounds", testPitchedSoundRendering)
         case "speech-language":
             return runSuite("speech-language", testSpeechLanguageDetection)
         case "insertion-target-live":
@@ -17588,6 +17638,7 @@ private enum PlanetkaSelfTest {
         try testInsertionTargetTracking()
         try testLegacyRenameMigration()
         try testSpeechLanguageDetection()
+        try testPitchedSoundRendering()
     }
 
     private static func testAICleanup() throws {
@@ -22793,6 +22844,35 @@ private enum PlanetkaSelfTest {
         )
     }
 
+    private static func testPitchedSoundRendering() throws {
+        let fm = FileManager.default
+        let destination = fm.temporaryDirectory
+            .appendingPathComponent("planetka-selftest-pitch-\(UUID().uuidString).aiff")
+        defer { try? fm.removeItem(at: destination) }
+
+        let source = URL(fileURLWithPath: "/System/Library/Sounds/Bottle.aiff")
+        guard let input = try? AVAudioFile(forReading: source) else {
+            throw SelfTestFailure.failed("system sound Bottle.aiff should be readable")
+        }
+        try expect(Sounds.renderPitchedSound(named: "Bottle", to: destination, rate: 0.7),
+                   equals: true,
+                   "lowering a system sound should produce a playable file")
+
+        guard let rendered = try? AVAudioFile(forReading: destination) else {
+            throw SelfTestFailure.failed("the lowered sound should be readable back")
+        }
+        let expectedRate = (input.fileFormat.sampleRate * 0.7).rounded()
+        try expect(rendered.fileFormat.sampleRate.rounded(),
+                   equals: expectedRate,
+                   "the lowered sound should carry the scaled sample rate")
+        try expect(rendered.length,
+                   equals: input.length,
+                   "lowering should re-label the samples, never drop any")
+        try expect(Sounds.renderPitchedSound(named: "NoSuchSystemSound", to: destination, rate: 0.7),
+                   equals: false,
+                   "a missing system sound should fail rendering instead of trapping")
+    }
+
     private static func expect<T: Equatable>(
         _ actual: T,
         equals expected: T,
@@ -22917,6 +22997,80 @@ private final class PaletteBlock: NSView {
         layer?.cornerRadius = radius
         layer?.borderWidth = stroke == nil ? 0 : 1
         layer?.borderColor = stroke?.cgColor
+    }
+}
+
+/// Toggle drawn from the palette. `NSSwitch` takes the system accent colour —
+/// blue on most Macs — which fights the terracotta the rest of the interface
+/// is built on.
+private final class PaletteSwitch: NSButton {
+    private var isOnState: Bool
+
+    init(isOn: Bool, target: AnyObject?, action: Selector) {
+        self.isOnState = isOn
+        super.init(frame: .zero)
+        self.target = target
+        self.action = action
+        title = ""
+        isBordered = false
+        wantsLayer = true
+        setButtonType(.momentaryChange)
+        translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 40),
+            heightAnchor.constraint(equalToConstant: 23),
+        ])
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    /// Mirrors `NSSwitch.state` so call sites keep reading `.on` / `.off`.
+    override var state: NSControl.StateValue {
+        get { isOnState ? .on : .off }
+        set {
+            isOnState = newValue == .on
+            needsDisplay = true
+        }
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        let dim: CGFloat = isEnabled ? 1 : 0.4
+        layer?.cornerRadius = bounds.height / 2
+        layer?.backgroundColor = (isOnState ? Palette.accent : Palette.sunk)
+            .withAlphaComponent(dim).cgColor
+        layer?.borderWidth = isOnState ? 0 : 1
+        layer?.borderColor = Palette.border.withAlphaComponent(dim).cgColor
+
+        let knobSize = bounds.height - 6
+        let knob = knobLayer()
+        knob.frame = CGRect(x: isOnState ? bounds.width - knobSize - 3 : 3,
+                            y: 3,
+                            width: knobSize,
+                            height: knobSize)
+        knob.cornerRadius = knobSize / 2
+        knob.backgroundColor = NSColor.white.withAlphaComponent(dim).cgColor
+    }
+
+    private func knobLayer() -> CALayer {
+        if let existing = layer?.sublayers?.first { return existing }
+        let knob = CALayer()
+        knob.shadowColor = NSColor.black.cgColor
+        knob.shadowOpacity = 0.16
+        knob.shadowRadius = 1.5
+        knob.shadowOffset = CGSize(width: 0, height: -0.5)
+        layer?.addSublayer(knob)
+        return knob
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard isEnabled else { return }
+        isOnState.toggle()
+        needsDisplay = true
+        if let action, let target {
+            NSApp.sendAction(action, to: target, from: self)
+        }
     }
 }
 
@@ -23273,87 +23427,99 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         root.edgeInsets = NSEdgeInsets(top: 22, left: 24, bottom: 22, right: 24)
         root.translatesAutoresizingMaskIntoConstraints = false
 
-        root.addArrangedSubview(settingsHeaderView())
-        root.addArrangedSubview(separator())
-        root.addArrangedSubview(hotkeyRow(
-            title: t("Диктовка", "Dictation"),
-            shortcut: draft.dictationHotkey,
-            kind: .dictation,
-            toolTip: t("Начать запись. Повторное нажатие завершает её выбранным способом.",
-                       "Start recording. Press again to finish using the selected action.")
-        ))
-        root.addArrangedSubview(primaryCompletionBehaviorRow(draft))
-        root.addArrangedSubview(alternateCompletionRow(draft))
-        root.addArrangedSubview(enterDelayRow(draft))
-        root.addArrangedSubview(separator())
-        root.addArrangedSubview(aiCleanupSection(draft))
-        root.addArrangedSubview(separator())
-        root.addArrangedSubview(hotkeyRow(
-            title: t("История", "History"),
-            shortcut: draft.historyHotkey,
-            kind: .history,
-            toolTip: t("Открыть или закрыть последние транскрипции.",
-                       "Open or close recent transcriptions.")
-        ))
-        root.addArrangedSubview(separator())
-        root.addArrangedSubview(microphoneSettingsRow(draft))
-        root.addArrangedSubview(separator())
-        root.addArrangedSubview(panelLabel(t("Обработка текста", "Text processing"),
-                                           size: 12,
-                                           weight: .semibold,
-                                           color: Palette.inkMuted))
-        root.addArrangedSubview(removeFinalPeriodRow(draft))
-        root.addArrangedSubview(separator())
-        root.addArrangedSubview(speechLanguageColorsRow(draft))
-        root.addArrangedSubview(separator())
-        root.addArrangedSubview(popupRow(
-            title: t("Размер капсулы", "Capsule size"),
-            detail: t("Размер плавающего индикатора записи.",
-                      "Size of the floating recording indicator."),
-            selectedValue: draft.hudSize.rawValue,
-            options: RecordingHUDSize.allCases.map { (localizedHUDSizeName($0), $0.rawValue) },
-            action: #selector(selectRecordingHUDSize(_:)),
-            toolTip: t("Выбрать компактную, обычную или крупную капсулу.",
-                       "Choose a compact, standard, or large capsule.")
-        ))
-        root.addArrangedSubview(popupRow(
-            title: t("Цвет записи", "Recording color"),
-            detail: t("Цвет аудиоволн, пока микрофон слушает.",
-                      "Color used while the microphone is listening."),
-            selectedValue: draft.recordingColor.rawValue,
-            options: RecordingHUDAccentColor.allCases.map { (localizedColorName($0), $0.rawValue) },
-            action: #selector(selectRecordingHUDRecordingColor(_:)),
-            toolTip: t("Цвет индикатора во время записи.", "Indicator color while recording.")
-        ))
-        root.addArrangedSubview(popupRow(
-            title: t("Цвет транскрибации", "Transcribing color"),
-            detail: t("Цвет анимации во время распознавания речи.",
-                      "Color used while speech is being converted to text."),
-            selectedValue: draft.transcribingColor.rawValue,
-            options: RecordingHUDAccentColor.allCases.map { (localizedColorName($0), $0.rawValue) },
-            action: #selector(selectRecordingHUDTranscribingColor(_:)),
-            toolTip: t("Цвет индикатора во время распознавания речи.",
-                       "Indicator color while speech is being transcribed.")
-        ))
-        root.addArrangedSubview(popupRow(
-            title: t("Фон капсулы", "HUD background"),
-            detail: t("Системная тема или постоянный светлый/тёмный фон.",
-                      "Follow the system appearance or use a fixed background."),
-            selectedValue: draft.backgroundStyle.rawValue,
-            options: RecordingHUDBackgroundStyle.allCases.map { (localizedBackgroundName($0), $0.rawValue) },
-            action: #selector(selectRecordingHUDBackgroundStyle(_:)),
-            toolTip: t("Выбрать фон плавающего индикатора диктовки.",
-                       "Choose the floating dictation indicator background.")
-        ))
-        root.addArrangedSubview(separator())
-        root.addArrangedSubview(permissionsRecoveryRow())
-        root.addArrangedSubview(settingsActionsRow(draft: draft))
-        root.addArrangedSubview(privacyInfoView())
+        let header = settingsHeaderView()
+        let dictation = settingsGroup(t("Диктовка", "Dictation"), [
+            hotkeyRow(
+                title: t("Сочетание клавиш", "Shortcut"),
+                shortcut: draft.dictationHotkey,
+                kind: .dictation,
+                toolTip: t("Начать запись. Повторное нажатие завершает её выбранным способом.",
+                           "Start recording. Press again to finish using the selected action.")
+            ),
+            primaryCompletionBehaviorRow(draft),
+            alternateCompletionRow(draft),
+            enterDelayRow(draft),
+        ])
+        let cleanup = settingsGroup(t("AI-чистка", "AI cleanup"), [aiCleanupSection(draft)])
+        let history = settingsGroup(t("История", "History"), [
+            hotkeyRow(
+                title: t("Сочетание клавиш", "Shortcut"),
+                shortcut: draft.historyHotkey,
+                kind: .history,
+                toolTip: t("Открыть или закрыть последние транскрипции.",
+                           "Open or close recent transcriptions.")
+            ),
+        ])
+        let input = settingsGroup(t("Звук и текст", "Audio and text"), [
+            microphoneSettingsRow(draft),
+            removeFinalPeriodRow(draft),
+        ])
+        let indicator = settingsGroup(t("Индикатор записи", "Recording indicator"), [
+            speechLanguageColorsRow(draft),
+            popupRow(
+                title: t("Размер капсулы", "Capsule size"),
+                detail: t("Размер плавающего индикатора записи.",
+                          "Size of the floating recording indicator."),
+                selectedValue: draft.hudSize.rawValue,
+                options: RecordingHUDSize.allCases.map { (localizedHUDSizeName($0), $0.rawValue) },
+                action: #selector(selectRecordingHUDSize(_:)),
+                toolTip: t("Выбрать компактную, обычную или крупную капсулу.",
+                           "Choose a compact, standard, or large capsule.")
+            ),
+            popupRow(
+                title: t("Цвет записи", "Recording color"),
+                detail: t("Цвет аудиоволн, пока микрофон слушает. Работает, когда автоцвет по языку выключен.",
+                          "Colour used while the microphone is listening. Applies when language colouring is off."),
+                selectedValue: draft.recordingColor.rawValue,
+                options: RecordingHUDAccentColor.allCases.map { (localizedColorName($0), $0.rawValue) },
+                action: #selector(selectRecordingHUDRecordingColor(_:)),
+                toolTip: t("Цвет индикатора во время записи.", "Indicator color while recording.")
+            ),
+            popupRow(
+                title: t("Цвет транскрибации", "Transcribing color"),
+                detail: t("Цвет анимации во время распознавания речи.",
+                          "Color used while speech is being converted to text."),
+                selectedValue: draft.transcribingColor.rawValue,
+                options: RecordingHUDAccentColor.allCases.map { (localizedColorName($0), $0.rawValue) },
+                action: #selector(selectRecordingHUDTranscribingColor(_:)),
+                toolTip: t("Цвет индикатора во время распознавания речи.",
+                           "Indicator color while speech is being transcribed.")
+            ),
+            popupRow(
+                title: t("Фон капсулы", "HUD background"),
+                detail: t("Системная тема или постоянный светлый/тёмный фон.",
+                          "Follow the system appearance or use a fixed background."),
+                selectedValue: draft.backgroundStyle.rawValue,
+                options: RecordingHUDBackgroundStyle.allCases.map { (localizedBackgroundName($0), $0.rawValue) },
+                action: #selector(selectRecordingHUDBackgroundStyle(_:)),
+                toolTip: t("Выбрать фон плавающего индикатора диктовки.",
+                           "Choose the floating dictation indicator background.")
+            ),
+        ])
+        let maintenance = settingsGroup(t("Разрешения", "Permissions"), [permissionsRecoveryRow()])
+        let actions = settingsActionsRow(draft: draft)
+        let privacy = privacyInfoView()
 
-        let background = NSVisualEffectView()
-        background.material = .underWindowBackground
-        background.blendingMode = .behindWindow
-        background.state = .active
+        let groups: [NSView] = [dictation, cleanup, history, input, indicator, maintenance]
+        root.addArrangedSubview(header)
+        for (index, group) in groups.enumerated() {
+            root.addArrangedSubview(group)
+            if index < groups.count - 1 {
+                root.addArrangedSubview(separator())
+            }
+        }
+        root.addArrangedSubview(separator())
+        root.addArrangedSubview(actions)
+        root.addArrangedSubview(privacy)
+
+        // Groups breathe; the rule sits in the gap rather than against a group.
+        root.setCustomSpacing(22, after: header)
+        for group in groups {
+            root.setCustomSpacing(18, after: group)
+        }
+        root.setCustomSpacing(18, after: actions)
+
+        let background = PaletteBlock(fill: Palette.canvas)
 
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
@@ -23436,9 +23602,26 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
     /// keeps its own grey chrome and would be the one Mac-looking part left in
     /// the header.
     private func languageToggle() -> NSView {
+        let track = paletteSegmented(titles: ["RU", "EN"],
+                                     selectedIndex: language == .russian ? 0 : 1,
+                                     action: #selector(languageToggleClicked(_:)),
+                                     fontSize: 10.5,
+                                     minimumWidth: 27)
+        track.toolTip = t("Язык панели и настроек", "Panel and settings language")
+        return track
+    }
+
+    /// Segmented track drawn from the palette: a sunk rail with the chosen
+    /// option raised on a surface chip. `NSSegmentedControl` keeps its own grey
+    /// chrome, which is the one thing that still read as a stock Mac control.
+    private func paletteSegmented(titles: [String],
+                                  selectedIndex: Int,
+                                  action: Selector,
+                                  enabled: Bool = true,
+                                  fontSize: CGFloat = 11.5,
+                                  minimumWidth: CGFloat = 0) -> NSView {
         let track = PaletteBlock(fill: Palette.sunk, stroke: Palette.border, radius: 7)
         track.translatesAutoresizingMaskIntoConstraints = false
-        track.toolTip = t("Язык панели и настроек", "Panel and settings language")
 
         let row = NSStackView()
         row.orientation = .horizontal
@@ -23446,26 +23629,29 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         row.spacing = 2
         row.translatesAutoresizingMaskIntoConstraints = false
 
-        for (index, code) in ["RU", "EN"].enumerated() {
-            let isSelected = (index == 0) == (language == .russian)
-            let button = NSButton(title: code, target: self, action: #selector(languageToggleClicked(_:)))
+        let font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
+        for (index, title) in titles.enumerated() {
+            let isSelected = index == selectedIndex
+            let button = NSButton(title: title, target: self, action: action)
             button.tag = index
             button.isBordered = false
+            button.isEnabled = enabled
             button.wantsLayer = true
             button.setButtonType(.momentaryChange)
+            let ink = enabled ? (isSelected ? Palette.ink : Palette.inkFaint)
+                              : Palette.inkFaint.withAlphaComponent(0.5)
             button.attributedTitle = NSAttributedString(
-                string: code,
-                attributes: [
-                    .font: NSFont.systemFont(ofSize: 10.5, weight: .semibold),
-                    .foregroundColor: isSelected ? Palette.ink : Palette.inkFaint,
-                ]
+                string: title,
+                attributes: [.font: font, .foregroundColor: ink]
             )
             button.layer?.cornerRadius = 5
             button.layer?.backgroundColor = (isSelected ? Palette.surface : NSColor.clear).cgColor
             button.translatesAutoresizingMaskIntoConstraints = false
+            let width = max(minimumWidth,
+                            title.size(withAttributes: [.font: font]).width + 20)
             NSLayoutConstraint.activate([
-                button.widthAnchor.constraint(equalToConstant: 27),
-                button.heightAnchor.constraint(equalToConstant: 18),
+                button.widthAnchor.constraint(equalToConstant: width),
+                button.heightAnchor.constraint(equalToConstant: 20),
             ])
             row.addArrangedSubview(button)
         }
@@ -24099,17 +24285,14 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
             color: Palette.inkMuted
         ))
 
-        let control = NSSegmentedControl(
-            labels: [t("Вставить", "Insert"), t("Вставить + Enter", "Insert + Enter")],
-            trackingMode: .selectOne,
-            target: self,
-            action: #selector(selectPrimaryCompletionBehavior(_:))
+        let control = paletteSegmented(
+            titles: [t("Вставить", "Insert"), t("Вставить + Enter", "Insert + Enter")],
+            selectedIndex: draft.primaryCompletionBehavior == .insert ? 0 : 1,
+            action: #selector(selectPrimaryCompletionBehavior(_:)),
+            enabled: serviceOperation == nil
         )
-        control.selectedSegment = draft.primaryCompletionBehavior == .insert ? 0 : 1
-        control.isEnabled = serviceOperation == nil
         control.toolTip = t("Выберите действие при повторном нажатии основного хоткея.",
                             "Choose what the main shortcut does when pressed again.")
-        control.setContentHuggingPriority(.required, for: .horizontal)
 
         row.addArrangedSubview(text)
         row.addArrangedSubview(NSView())
@@ -24142,9 +24325,7 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
             color: Palette.inkMuted
         ))
 
-        let toggle = NSSwitch()
-        toggle.target = self
-        toggle.action = #selector(toggleAlternateCompletion(_:))
+        let toggle = PaletteSwitch(isOn: false, target: self, action: #selector(toggleAlternateCompletion(_:)))
         toggle.state = draft.alternateCompletionEnabled ? .on : .off
         toggle.isEnabled = serviceOperation == nil
         toggle.toolTip = t("Включить дополнительный способ завершения записи.",
@@ -24197,9 +24378,6 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         section.alignment = .leading
         section.spacing = 8
 
-        section.addArrangedSubview(panelLabel(t("AI-чистка текста", "AI Cleanup"),
-                                              size: 13,
-                                              weight: .semibold))
         let detail = panelLabel(
             t("Необязательно: после распознавания текст отправляется на OpenAI-совместимый сервер для исправления грамматики и пунктуации. По умолчанию выключено.",
               "Optional: after transcription the text is sent to an OpenAI-compatible endpoint to fix grammar and punctuation. Off by default."),
@@ -24214,9 +24392,7 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         enableRow.orientation = .horizontal
         enableRow.alignment = .centerY
         enableRow.spacing = 10
-        let toggle = NSSwitch()
-        toggle.target = self
-        toggle.action = #selector(toggleAICleanupDraft(_:))
+        let toggle = PaletteSwitch(isOn: false, target: self, action: #selector(toggleAICleanupDraft(_:)))
         toggle.state = draft.aiCleanupEnabled ? .on : .off
         toggle.isEnabled = hasKey
         toggle.toolTip = hasKey
@@ -24354,7 +24530,7 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         detail.lineBreakMode = .byWordWrapping
         text.addArrangedSubview(detail)
 
-        let popup = NSPopUpButton()
+        let popup = paletteePopUp()
         popup.target = self
         popup.action = #selector(selectInputDeviceDraft(_:))
         popup.toolTip = t(
@@ -24416,9 +24592,7 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         detail.preferredMaxLayoutWidth = 500
         text.addArrangedSubview(detail)
 
-        let toggle = NSSwitch()
-        toggle.target = self
-        toggle.action = #selector(toggleSpeechLanguageColors(_:))
+        let toggle = PaletteSwitch(isOn: false, target: self, action: #selector(toggleSpeechLanguageColors(_:)))
         toggle.state = draft.speechLanguageColors ? .on : .off
         toggle.isEnabled = serviceOperation == nil
         toggle.toolTip = t("Определять язык речи и красить капсулу записи в его цвет.",
@@ -24455,9 +24629,7 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         detail.preferredMaxLayoutWidth = 500
         text.addArrangedSubview(detail)
 
-        let toggle = NSSwitch()
-        toggle.target = self
-        toggle.action = #selector(toggleRemoveFinalPeriod(_:))
+        let toggle = PaletteSwitch(isOn: false, target: self, action: #selector(toggleRemoveFinalPeriod(_:)))
         toggle.state = draft.removeFinalPeriod ? .on : .off
         toggle.isEnabled = serviceOperation == nil
         toggle.toolTip = t("Убрать один символ . только в самом конце распознанного текста.",
@@ -24515,6 +24687,21 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         return row
     }
 
+    /// Pop-up stripped of its system bezel and re-seated on a palette chip.
+    private func paletteePopUp() -> NSPopUpButton {
+        let popup = paletteePopUp()
+        popup.isBordered = false
+        popup.wantsLayer = true
+        popup.layer?.cornerRadius = 7
+        popup.layer?.backgroundColor = Palette.surface.cgColor
+        popup.layer?.borderWidth = 1
+        popup.layer?.borderColor = Palette.border.cgColor
+        popup.contentTintColor = Palette.ink
+        popup.translatesAutoresizingMaskIntoConstraints = false
+        popup.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        return popup
+    }
+
     private func popupRow(title: String,
                           detail: String,
                           selectedValue: String,
@@ -24533,7 +24720,7 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         text.addArrangedSubview(panelLabel(title, size: 13, weight: .semibold))
         text.addArrangedSubview(panelLabel(detail, size: 12, color: Palette.inkMuted))
 
-        let popup = NSPopUpButton()
+        let popup = paletteePopUp()
         popup.target = self
         popup.action = action
         popup.toolTip = toolTip
@@ -24835,10 +25022,23 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         ])
     }
 
-    private func separator() -> NSBox {
-        let box = NSBox()
-        box.boxType = .separator
-        return box
+    private func separator() -> NSView {
+        hairline()
+    }
+
+    /// A settings group: small caps heading, then its rows, spaced tighter
+    /// than the gaps between groups so the grouping is visible without boxes.
+    private func settingsGroup(_ title: String, _ rows: [NSView]) -> NSView {
+        let block = NSStackView()
+        block.orientation = .vertical
+        block.alignment = .leading
+        block.spacing = 12
+        block.addArrangedSubview(sectionLabel(title))
+        for row in rows {
+            block.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: block.widthAnchor).isActive = true
+        }
+        return block
     }
 
     private func triggerModeText() -> String {
@@ -25329,28 +25529,28 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         refreshSettingsWindow()
     }
 
-    @objc private func selectPrimaryCompletionBehavior(_ sender: NSSegmentedControl) {
+    @objc private func selectPrimaryCompletionBehavior(_ sender: NSButton) {
         var draft = settingsDraft ?? ControlPanelSettingsDraft(settings: settings)
-        draft.primaryCompletionBehavior = sender.selectedSegment == 1 ? .insertAndEnter : .insert
+        draft.primaryCompletionBehavior = sender.tag == 1 ? .insertAndEnter : .insert
         settingsDraft = draft
         refreshSettingsWindow()
     }
 
-    @objc private func toggleAlternateCompletion(_ sender: NSSwitch) {
+    @objc private func toggleAlternateCompletion(_ sender: NSButton) {
         var draft = settingsDraft ?? ControlPanelSettingsDraft(settings: settings)
         draft.alternateCompletionEnabled = sender.state == .on
         settingsDraft = draft
         refreshSettingsWindow()
     }
 
-    @objc private func toggleSpeechLanguageColors(_ sender: NSSwitch) {
+    @objc private func toggleSpeechLanguageColors(_ sender: NSButton) {
         var draft = settingsDraft ?? ControlPanelSettingsDraft(settings: settings)
         draft.speechLanguageColors = sender.state == .on
         settingsDraft = draft
         refreshSettingsWindow()
     }
 
-    @objc private func toggleRemoveFinalPeriod(_ sender: NSSwitch) {
+    @objc private func toggleRemoveFinalPeriod(_ sender: NSButton) {
         var draft = settingsDraft ?? ControlPanelSettingsDraft(settings: settings)
         draft.removeFinalPeriod = sender.state == .on
         settingsDraft = draft
@@ -25416,7 +25616,7 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         refreshSettingsWindow(captureFields: false)
     }
 
-    @objc private func toggleAICleanupDraft(_ sender: NSSwitch) {
+    @objc private func toggleAICleanupDraft(_ sender: NSButton) {
         var draft = settingsDraft ?? ControlPanelSettingsDraft(settings: settings)
         draft.aiCleanupEnabled = sender.state == .on
         settingsDraft = draft
