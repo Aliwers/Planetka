@@ -35,7 +35,7 @@ Planetka — быстрая локальная диктовка для macOS. А
 удаляйте. Откройте Terminal и ещё раз выполните ту же команду:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Aliwers/Planetka/main/install.sh | /usr/bin/arch -arm64 /bin/bash
+curl -fsSL https://raw.githubusercontent.com/Aliwers/Planetka/v1.2.7/install.sh | /usr/bin/arch -arm64 /bin/bash
 ```
 
 Команда заменяет только `/Applications/Planetka.app`. История, настройки и

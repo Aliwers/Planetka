@@ -29,7 +29,12 @@ manifest_sha256="$(plutil -extract sha256 raw -o - update.json)"
 grep -q 'com.apple.security.device.audio-input' entitlements.plist
 grep -q 'com.apple.security.device.microphone' entitlements.plist
 
-! grep -q 'raw.githubusercontent.com/Aliwers/Planetka/main/' README.md
+# `! grep` is exempt from `set -e`, so a negative check has to fail by hand or
+# it silently passes forever.
+if grep -q 'raw.githubusercontent.com/Aliwers/Planetka/main/' README.md; then
+    printf 'README pins an install command to /main/ instead of /v%s/.\n' "$app_version" >&2
+    exit 1
+fi
 grep -q 'raw.githubusercontent.com/Aliwers/Planetka/v'"$app_version"'/' README.md
 grep -q '^REF="${PLANETKA_REF:-\$SOURCE_COMMIT}"$' install.sh
 grep -q '^EXPECTED_SOURCE_COMMIT="${PLANETKA_SOURCE_COMMIT:-\$SOURCE_COMMIT}"$' install.sh
@@ -41,7 +46,10 @@ grep -q 'validate_output_app_path "$OUTPUT_APP"' scripts/build-app.sh
 
 # The smoke test must read the expected version from the manifest; a literal
 # there silently rots one release after it is written.
-! grep -qE 'CFBundleShortVersionString.*= "[0-9]' .github/workflows/release-smoke.yml
+if grep -qE 'CFBundleShortVersionString.*= "[0-9]' .github/workflows/release-smoke.yml; then
+    printf 'release-smoke.yml hardcodes a version; read it from update.json instead.\n' >&2
+    exit 1
+fi
 
 git diff --check
 printf 'Planetka checks passed (v%s).\n' "$app_version"
