@@ -103,9 +103,6 @@ let RECORDING_HUD_DISPLAY_LINK_MAX_FPS: Float = 120
 let RECORDING_HUD_RECORDING_BASE_PHASE_SPEED: CGFloat = 16.96
 let RECORDING_HUD_RECORDING_LEVEL_PHASE_SPEED: CGFloat = 10.08
 let RECORDING_HUD_TRANSCRIBING_PHASE_SPEED: CGFloat = 10.2
-let RECORDING_HUD_SUCCESS_COLOR = NSColor(srgbRed: 0.25, green: 0.66, blue: 0.42, alpha: 1)
-let RECORDING_HUD_FINISH_DRAW_SECONDS: TimeInterval = 0.42
-let RECORDING_HUD_FINISH_HOLD_SECONDS: TimeInterval = 0.34
 /// How much speech to gather before asking the model which language it is.
 let SPEECH_LANGUAGE_PROBE_DELAY_SECONDS: TimeInterval = 1.2
 /// How often to ask again, so switching language mid-dictation recolours the
@@ -154,8 +151,6 @@ enum MenuBarState {
 enum RecordingHUDMode {
     case recording
     case transcribing
-    /// Green capsule collapsing into a checkmark once the text has landed.
-    case finished
     /// Brief flash shown when a dictation fails (transcription error,
     /// paste failure). Renders a static yellow capsule so the user
     /// gets visual feedback even when the menu-bar icon is hidden.
@@ -1956,7 +1951,6 @@ func recordingHUDAccent(mode: RecordingHUDMode,
     switch mode {
     case .recording:    return languageAccent ?? recordingColor
     case .transcribing: return languageAccent ?? transcribingColor
-    case .finished:     return RECORDING_HUD_SUCCESS_COLOR
     case .error:        return .systemYellow
     }
 }
@@ -1969,8 +1963,7 @@ func recordingHUDPhaseSpeed(mode: RecordingHUDMode, level: Float) -> CGFloat {
             + (voiceLevel * RECORDING_HUD_RECORDING_LEVEL_PHASE_SPEED)
     case .transcribing:
         return RECORDING_HUD_TRANSCRIBING_PHASE_SPEED
-    case .error, .finished:
-        // Both are still frames: nothing in them is driven by the phase.
+    case .error:
         return 0
     }
 }
@@ -3077,7 +3070,9 @@ final class Settings: @unchecked Sendable {
         get {
             guard let raw = defaults.string(forKey: Self.keyRecordingHUDBackgroundStyle),
                   let style = RecordingHUDBackgroundStyle(rawValue: raw) else {
-                return .system
+                // Translucent dark by default: following the system meant a
+                // white capsule in light mode, glaring over pale windows.
+                return .dark
             }
             return style
         }
@@ -9581,13 +9576,6 @@ private final class RecordingHUDView: NSView {
         }
     }
 
-    /// 0…1 while the capsule collapses into the checkmark.
-    var finishProgress: CGFloat = 0 {
-        didSet {
-            if oldValue != finishProgress { needsDisplay = true }
-        }
-    }
-
     var level: Float = 0 {
         didSet {
             if oldValue != level { needsDisplay = true }
@@ -9631,14 +9619,8 @@ private final class RecordingHUDView: NSView {
         let idleBreath = 0.0032 + (0.0018 * sin(phase * 0.31))
         let voiceBreath = audio * (0.014 + (0.008 * ((sin(phase * 0.87) + 1) / 2)))
         let liveScale = 1 + ((idleBreath + voiceBreath) * breathingReady)
-        var capsuleWidth = (startDiameter + ((finalRect.width - startDiameter) * grow)) * liveScale
+        let capsuleWidth = (startDiameter + ((finalRect.width - startDiameter) * grow)) * liveScale
         let capsuleHeight = (startDiameter + ((finalRect.height - startDiameter) * grow)) * liveScale
-        if mode == .finished {
-            // The background is on its way out, so the capsule pulls in to a
-            // square around the check rather than staying a wide pill.
-            let collapse = smootherstep(0, 0.45, finishProgress)
-            capsuleWidth += (capsuleHeight - capsuleWidth) * collapse
-        }
         let capsuleRect = NSRect(x: bounds.midX - (capsuleWidth / 2),
                                  y: bounds.midY - (capsuleHeight / 2),
                                  width: capsuleWidth,
@@ -9646,12 +9628,7 @@ private final class RecordingHUDView: NSView {
         let capsule = NSBezierPath(roundedRect: capsuleRect,
                                    xRadius: capsuleRect.height / 2,
                                    yRadius: capsuleRect.height / 2)
-        // The finished state fades its own background out: what stays is the
-        // green check on nothing.
-        let backgroundFade = mode == .finished
-            ? (1 - smootherstep(0, 0.55, finishProgress))
-            : 1
-        let palette = backgroundPalette(alpha: capsuleAlpha * backgroundFade)
+        let palette = backgroundPalette(alpha: capsuleAlpha)
         palette.fill.setFill()
         capsule.fill()
         let accent = recordingHUDAccent(mode: mode,
@@ -9659,7 +9636,7 @@ private final class RecordingHUDView: NSView {
                                         recordingColor: recordingColor,
                                         transcribingColor: transcribingColor)
         let vividAccent = accent
-        if showsCapsuleStroke, backgroundFade > 0.001 {
+        if showsCapsuleStroke {
             palette.stroke.setStroke()
             capsule.lineWidth = 1 * visualScale
             capsule.stroke()
@@ -9675,11 +9652,6 @@ private final class RecordingHUDView: NSView {
         capsule.addClip()
         context.setAlpha(contentAlpha)
         defer { NSGraphicsContext.restoreGraphicsState() }
-
-        if mode == .finished {
-            drawSuccessCheck(in: capsuleRect, progress: finishProgress)
-            return
-        }
 
         if mode == .transcribing {
             drawTranscribingWave(in: capsuleRect, alpha: 1)
@@ -9736,39 +9708,6 @@ private final class RecordingHUDView: NSView {
             vividAccent.withAlphaComponent(0.74 + (0.26 * activity)).setFill()
             path.fill()
         }
-    }
-
-    /// Checkmark stroked on as `progress` runs, so it draws itself rather than
-    /// popping in. The view is flipped, so the elbow sits at the larger y.
-    private func drawSuccessCheck(in rect: NSRect, progress: CGFloat) {
-        let reveal = smootherstep(0.35, 1, max(0, min(1, progress)))
-        guard reveal > 0.001 else { return }
-        let points = [
-            NSPoint(x: rect.minX + rect.width * 0.30, y: rect.minY + rect.height * 0.50),
-            NSPoint(x: rect.minX + rect.width * 0.44, y: rect.minY + rect.height * 0.68),
-            NSPoint(x: rect.minX + rect.width * 0.72, y: rect.minY + rect.height * 0.33),
-        ]
-        let firstLength = hypot(points[1].x - points[0].x, points[1].y - points[0].y)
-        let secondLength = hypot(points[2].x - points[1].x, points[2].y - points[1].y)
-        let drawn = (firstLength + secondLength) * reveal
-
-        let path = NSBezierPath()
-        path.move(to: points[0])
-        if drawn <= firstLength {
-            let t = firstLength > 0 ? drawn / firstLength : 1
-            path.line(to: NSPoint(x: points[0].x + (points[1].x - points[0].x) * t,
-                                  y: points[0].y + (points[1].y - points[0].y) * t))
-        } else {
-            path.line(to: points[1])
-            let t = secondLength > 0 ? min(1, (drawn - firstLength) / secondLength) : 1
-            path.line(to: NSPoint(x: points[1].x + (points[2].x - points[1].x) * t,
-                                  y: points[1].y + (points[2].y - points[1].y) * t))
-        }
-        path.lineWidth = max(2.2, min(rect.width, rect.height) * 0.13)
-        path.lineCapStyle = .round
-        path.lineJoinStyle = .round
-        RECORDING_HUD_SUCCESS_COLOR.setStroke()
-        path.stroke()
     }
 
     private func drawTranscribingWave(in capsuleRect: NSRect, alpha: CGFloat) {
@@ -9886,8 +9825,8 @@ private final class RecordingHUDView: NSView {
             )
         }
         return (
-            NSColor(calibratedWhite: 0.0, alpha: 0.96 * alpha),
-            NSColor(calibratedWhite: 0.22, alpha: 0.26 * alpha)
+            NSColor(calibratedWhite: 0.0, alpha: 0.62 * alpha),
+            NSColor(calibratedWhite: 1.0, alpha: 0.10 * alpha)
         )
     }
 
@@ -9926,13 +9865,11 @@ private func exportRecordingHUDAnimationFrames(to directory: URL) throws {
     let emptyLead = 0.35
     let recordingDuration = 6.20
     let transcribingDuration = 2.40
-    let finishedDuration = RECORDING_HUD_FINISH_DRAW_SECONDS + RECORDING_HUD_FINISH_HOLD_SECONDS
     let emptyTail = 0.50
     let totalDuration = emptyLead
         + RECORDING_HUD_ANIMATE_IN_SECONDS
         + recordingDuration
         + transcribingDuration
-        + finishedDuration
         + RECORDING_HUD_ANIMATE_OUT_SECONDS
         + emptyTail
     let frameCount = Int((totalDuration * framesPerSecond).rounded())
@@ -9953,8 +9890,7 @@ private func exportRecordingHUDAnimationFrames(to directory: URL) throws {
             let revealStart = emptyLead
             let recordingStart = revealStart + RECORDING_HUD_ANIMATE_IN_SECONDS
             let transcribingStart = recordingStart + recordingDuration
-            let finishedStart = transcribingStart + transcribingDuration
-            let hideStart = finishedStart + finishedDuration
+            let hideStart = transcribingStart + transcribingDuration
             let tailStart = hideStart + RECORDING_HUD_ANIMATE_OUT_SECONDS
 
             let reveal: CGFloat
@@ -9980,27 +9916,21 @@ private func exportRecordingHUDAnimationFrames(to directory: URL) throws {
                 level = Float(min(0.94, 0.10 + (0.78 * syllables * phrasing * detail)))
                 mode = .recording
                 transcribingElapsed = nil
-            } else if time < finishedStart {
+            } else if time < hideStart {
                 reveal = 1
                 level = 0
                 mode = .transcribing
                 transcribingElapsed = CGFloat(time - transcribingStart)
-            } else if time < hideStart {
-                reveal = 1
-                level = 0
-                mode = .finished
-                transcribingElapsed = nil
-                view.finishProgress = CGFloat(min(1, (time - finishedStart) / RECORDING_HUD_FINISH_DRAW_SECONDS))
             } else if time < tailStart {
                 reveal = 1 - CGFloat((time - hideStart) / RECORDING_HUD_ANIMATE_OUT_SECONDS)
                 level = 0
-                mode = .finished
-                transcribingElapsed = nil
+                mode = .transcribing
+                transcribingElapsed = CGFloat(time - transcribingStart)
             } else {
                 reveal = 0
                 level = 0
-                mode = .finished
-                transcribingElapsed = nil
+                mode = .transcribing
+                transcribingElapsed = CGFloat(time - transcribingStart)
             }
 
             phase += recordingHUDPhaseSpeed(mode: mode, level: level)
@@ -11045,7 +10975,6 @@ final class PlanetkaApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Early language pass. Held so the final transcription can await it: the
     /// Neural Engine refuses two inferences at once.
     private var speechLanguageProbe: Task<Void, Never>?
-    private var recordingHUDFinishStartedAt: TimeInterval?
     private let insertionTargetTracker = FocusedInsertionTargetTracker()
     private let settings = Settings.shared
 
@@ -12524,11 +12453,6 @@ final class PlanetkaApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         lastRecordingHUDMotionAt = now
 
         advanceRecordingHUDRevealAnimation(at: now)
-        if recordingHUDView?.mode == .finished, let startedAt = recordingHUDFinishStartedAt {
-            let elapsed = now - startedAt
-            recordingHUDView?.finishProgress =
-                CGFloat(min(1, elapsed / RECORDING_HUD_FINISH_DRAW_SECONDS))
-        }
         let mode = recordingHUDView?.mode
             ?? ((isBusy && !isRecording) ? .transcribing : .recording)
         let speed = recordingHUDPhaseSpeed(mode: mode, level: recordingVisualLevel)
@@ -12971,10 +12895,7 @@ final class PlanetkaApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return NSRect(x: x, y: y, width: frame.width, height: frame.height)
     }
 
-    private func finishBusyHUD(succeeded: Bool = false) {
-        if succeeded, showFinishedHUD() {
-            return
-        }
+    private func finishBusyHUD() {
         if let startedAt = recordingHUDTranscribingStartedAt {
             let elapsed = ProcessInfo.processInfo.systemUptime - startedAt
             let remaining = RECORDING_HUD_TRANSCRIBING_MIN_VISIBLE_SECONDS - elapsed
@@ -12992,31 +12913,6 @@ final class PlanetkaApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         recordingHUDTranscribingStartedAt = nil
         hideRecordingHUD()
-    }
-
-    /// Green capsule collapsing into a checkmark: the dictation landed. Returns
-    /// false when there is no visible HUD to turn green, so the caller falls
-    /// back to hiding it the ordinary way.
-    @discardableResult
-    private func showFinishedHUD() -> Bool {
-        guard settings.showRecordingWaveform,
-              let view = recordingHUDView,
-              recordingHUDPanel?.isVisible == true else { return false }
-        recordingHUDTranscribingStartedAt = nil
-        view.finishProgress = 0
-        view.mode = .finished
-        recordingHUDFinishStartedAt = ProcessInfo.processInfo.systemUptime
-        startRecordingHUDMotion()
-        let visible = RECORDING_HUD_FINISH_DRAW_SECONDS + RECORDING_HUD_FINISH_HOLD_SECONDS
-        DispatchQueue.main.asyncAfter(deadline: .now() + visible) { [weak self] in
-            guard let self,
-                  self.recordingHUDView?.mode == .finished,
-                  !self.isRecording,
-                  !self.isBusy else { return }
-            self.recordingHUDFinishStartedAt = nil
-            self.hideRecordingHUD()
-        }
-        return true
     }
 
     // Visible + audible cue that a press produced no pasted text — the
@@ -13337,7 +13233,7 @@ final class PlanetkaApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 dictationFailed = true
             }
             isBusy = false
-            finishBusyHUD(succeeded: !dictationFailed && !isTerminating)
+            finishBusyHUD()
             if dictationFailed && !isTerminating {
                 signalDictationFailure()
             } else {
@@ -20066,9 +19962,6 @@ private enum PlanetkaSelfTest {
         try expect(english.blueComponent > english.redComponent, equals: true,
                    "English should be the blue capsule")
 
-        try expect(recordingHUDPhaseSpeed(mode: .finished, level: 1), equals: 0,
-                   "the finished capsule is a still frame")
-
         let red = try XCTUnwrapAccent(.russian)
         let userRecording = NSColor.systemPink
         let userTranscribing = NSColor.systemTeal
@@ -20107,12 +20000,6 @@ private enum PlanetkaSelfTest {
         try expect(nextSpeechLanguage(current: .unknown, detected: .english), equals: .english,
                    "the first clear probe sets the colour")
 
-        try expect(recordingHUDAccent(mode: .finished,
-                                      languageAccent: red,
-                                      recordingColor: userRecording,
-                                      transcribingColor: userTranscribing) == RECORDING_HUD_SUCCESS_COLOR,
-                   equals: true,
-                   "the checkmark is always green")
     }
 
     private static func XCTUnwrapAccent(_ language: SpeechLanguage) throws -> NSColor {
