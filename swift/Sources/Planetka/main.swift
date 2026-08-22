@@ -9672,29 +9672,42 @@ private final class RecordingHUDView: NSView {
             return
         }
 
-        // A single dot breathing with the voice. The eight-bar waveform kept
-        // moving on its own even in silence, which read as jitter at the edge
-        // of vision; here nothing moves unless the microphone hears something.
-        let restRadius = 3.2 * visualScale
-        let loudRadius = min(capsuleRect.height * 0.30, 9.0 * visualScale)
-        // The phase runs fast because the old bars needed it; a breath at that
-        // rate is a flutter, so the dot takes a slow fraction of it.
-        let breath = 1 + (0.06 * sin(phase * 0.16) * breathingReady)
-        let radius = (restRadius + ((loudRadius - restRadius) * audio)) * breath
-        let center = NSPoint(x: bounds.midX, y: bounds.midY)
+        // A small equaliser. The bars this replaced moved on their own even in
+        // silence, which read as jitter; here every bit of motion comes from
+        // the microphone, so a pause leaves a flat, still row.
+        let barCount = 5
+        let barWidth: CGFloat = 2.2 * visualScale
+        let barGap: CGFloat = 2.7 * visualScale
+        // Taller than wide even at rest, or the row reads as a line of dots.
+        let minHeight: CGFloat = 5.6 * visualScale
+        let maxHeight = min(capsuleRect.height * 0.70, 18.0 * visualScale)
+        let totalWidth = (CGFloat(barCount) * barWidth) + (CGFloat(barCount - 1) * barGap)
+        let startX = bounds.midX - (totalWidth / 2)
+        let centerY = bounds.midY
+        let centerIndex = CGFloat(barCount - 1) / 2
+        let breath = 1 + (0.05 * sin(phase * 0.16) * breathingReady)
 
-        let glowRadius = radius + (3.4 * visualScale) + (2.6 * visualScale * audio)
-        vividAccent.withAlphaComponent(0.10 + (0.14 * audio)).setFill()
-        NSBezierPath(ovalIn: NSRect(x: center.x - glowRadius,
-                                    y: center.y - glowRadius,
-                                    width: glowRadius * 2,
-                                    height: glowRadius * 2)).fill()
-
-        vividAccent.withAlphaComponent(0.86 + (0.14 * audio)).setFill()
-        NSBezierPath(ovalIn: NSRect(x: center.x - radius,
-                                    y: center.y - radius,
-                                    width: radius * 2,
-                                    height: radius * 2)).fill()
+        for index in 0..<barCount {
+            let i = CGFloat(index)
+            let normalized = (i - centerIndex) / max(centerIndex, 1)
+            // Middle bars carry the voice; the outer ones stay shorter.
+            let envelope = pow(max(0, cos(normalized * .pi / 2)), 0.7)
+            let travelling = (sin((phase * 0.22) - (normalized * 1.9)) + 1) / 2
+            // Speech is quiet in absolute terms; the curve lifts ordinary
+            // talking into the visible part of the range.
+            let voice = pow(audio, 0.72)
+            let activity = voice * envelope * (0.62 + (0.38 * travelling))
+            let height = (minHeight + ((maxHeight - minHeight) * activity)) * breath
+            let rect = NSRect(x: startX + (i * (barWidth + barGap)),
+                              y: centerY - (height / 2),
+                              width: barWidth,
+                              height: height)
+            let bar = NSBezierPath(roundedRect: rect,
+                                   xRadius: barWidth / 2,
+                                   yRadius: barWidth / 2)
+            vividAccent.withAlphaComponent(0.78 + (0.22 * activity)).setFill()
+            bar.fill()
+        }
     }
 
     private func drawTranscribingWave(in capsuleRect: NSRect, alpha: CGFloat) {
