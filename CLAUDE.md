@@ -31,7 +31,7 @@ codesign --verify --deep --strict ./dist/Planetka.app
 Suite names (`--self-test <name>`): `hotkey`, `readiness`, `paste`, `history`, `statistics`, `corrections`,
 `fillers`, `ai-cleanup`, `audio-level`, `audio-conversion`, `audio-input`, `model-status`, `audio-route`,
 `recording-lifecycle`, `power-state`, `model-integrity`, `update`, `hostile-env`, `logging`, `diagnostics`,
-`insertion-target`, `legacy-rename`, `all`. Two live suites (`audio-input-live`, `insertion-target-live`) touch real hardware
+`insertion-target`, `legacy-rename`, `speech-language`, `all`. Two live suites (`audio-input-live`, `insertion-target-live`) touch real hardware
 and are excluded from `all`.
 
 CI (`.github/workflows/build.yml`) runs exactly `check.sh` → `--self-test all` → `build-app.sh` → installer +
@@ -45,9 +45,9 @@ split it up on your own initiative. Navigate by `// MARK: -` headers:
 
 Constants · Text correction transfer · Correction sync path safety · Model registry hardening · Speech model
 integrity · Audio input devices · Logger · Settings · Permissions · Hotkey listener · Audio capture ·
-Transcription worker · Transcript corrections · Filler word removal · AI transcript cleanup · Recording
+Transcription worker · Transcript corrections · Speech language · Filler word removal · AI transcript cleanup · Recording
 lifecycle decisions · Text insertion · System audio mute · Sounds · Bundle version helpers · Diagnostics ·
-Update check · App · Legacy rename migration · Entry point
+Update check · Palette · App · Legacy rename migration · Entry point
 
 `grep -n '^// MARK:' main.swift` is the table of contents; the self-test harness is everything after
 `// MARK: - Entry point`.

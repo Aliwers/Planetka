@@ -103,6 +103,11 @@ let RECORDING_HUD_DISPLAY_LINK_MAX_FPS: Float = 120
 let RECORDING_HUD_RECORDING_BASE_PHASE_SPEED: CGFloat = 16.96
 let RECORDING_HUD_RECORDING_LEVEL_PHASE_SPEED: CGFloat = 10.08
 let RECORDING_HUD_TRANSCRIBING_PHASE_SPEED: CGFloat = 10.2
+let RECORDING_HUD_SUCCESS_COLOR = NSColor(srgbRed: 0.25, green: 0.66, blue: 0.42, alpha: 1)
+let RECORDING_HUD_FINISH_DRAW_SECONDS: TimeInterval = 0.42
+let RECORDING_HUD_FINISH_HOLD_SECONDS: TimeInterval = 0.34
+/// How much speech to gather before asking the model which language it is.
+let SPEECH_LANGUAGE_PROBE_DELAY_SECONDS: TimeInterval = 1.2
 let HOTKEY_CAPTURE_BEGIN_NOTIFICATION = Notification.Name("com.local.planetka.hotkey-capture-begin")
 let HOTKEY_CAPTURE_END_NOTIFICATION = Notification.Name("com.local.planetka.hotkey-capture-end")
 let SETTINGS_CHANGED_NOTIFICATION = Notification.Name("com.local.planetka.settings-changed")
@@ -143,6 +148,8 @@ enum MenuBarState {
 enum RecordingHUDMode {
     case recording
     case transcribing
+    /// Green capsule collapsing into a checkmark once the text has landed.
+    case finished
     /// Brief flash shown when a dictation fails (transcription error,
     /// paste failure). Renders a static yellow capsule so the user
     /// gets visual feedback even when the menu-bar icon is hidden.
@@ -1940,7 +1947,8 @@ func recordingHUDPhaseSpeed(mode: RecordingHUDMode, level: Float) -> CGFloat {
             + (voiceLevel * RECORDING_HUD_RECORDING_LEVEL_PHASE_SPEED)
     case .transcribing:
         return RECORDING_HUD_TRANSCRIBING_PHASE_SPEED
-    case .error:
+    case .error, .finished:
+        // Both are still frames: nothing in them is driven by the phase.
         return 0
     }
 }
@@ -2705,6 +2713,7 @@ final class Settings: @unchecked Sendable {
     private static let keyAICleanupBaseURL = "ai_cleanup_base_url"
     private static let keyAICleanupModel = "ai_cleanup_model"
     private static let keyRemoveFinalPeriod = "remove_final_period_v1"
+    private static let keySpeechLanguageColors = "speech_language_colors_v1"
     private static let keyEnterDelayMilliseconds = "enter_delay_milliseconds_v1"
     private static let keyActiveRunMarker = "active_run_marker"
     private static let keyAgentEnabled = "agent_enabled"
@@ -3375,6 +3384,13 @@ final class Settings: @unchecked Sendable {
     var removeFinalPeriod: Bool {
         get { defaults.bool(forKey: Self.keyRemoveFinalPeriod) }
         set { defaults.set(newValue, forKey: Self.keyRemoveFinalPeriod) }
+    }
+
+    /// Colour the capsule by the language being spoken. On by default; turning
+    /// it off restores the user's own recording colour.
+    var speechLanguageColors: Bool {
+        get { defaults.object(forKey: Self.keySpeechLanguageColors) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Self.keySpeechLanguageColors) }
     }
 
     var hasActiveRunMarker: Bool {
@@ -5134,6 +5150,12 @@ private struct AudioSampleAccumulator {
         sampleCount = 0
     }
 
+    /// Copy of what has been captured so far, leaving the recording running.
+    /// The language probe needs to look at the speech mid-flight.
+    func snapshot() -> CapturedAudioSegments {
+        CapturedAudioSegments(segments: segments, sampleCount: sampleCount)
+    }
+
     mutating func drain() -> CapturedAudioSegments {
         let captured = CapturedAudioSegments(segments: segments,
                                              sampleCount: sampleCount)
@@ -5401,6 +5423,20 @@ final class AudioCapture: @unchecked Sendable {
             journalFlushSeconds: journalFlushedAt - detachedAt,
             flattenSeconds: flattenedAt - journalFlushedAt
         )
+    }
+
+    /// Speech captured so far, without ending the recording. Returns nothing
+    /// once the recording has stopped, so a late probe cannot resurrect audio
+    /// that already went to the transcriber.
+    fileprivate func snapshotSamples() -> [Float] {
+        lock.lock()
+        guard _isRunning else {
+            lock.unlock()
+            return []
+        }
+        let captured = samples.snapshot()
+        lock.unlock()
+        return captured.flattened()
     }
 
     func latestRecordingLevelSnapshot() -> (level: Float, sequence: UInt64) {
@@ -6020,6 +6056,56 @@ enum TranscriptCorrector {
         guard !parts.isEmpty else { return nil }
         return #"(?<![\p{L}\p{N}_])"# + parts.joined(separator: #"\s+"#) + #"(?![\p{L}\p{N}_])"#
     }
+}
+
+// MARK: - Speech language
+
+/// The speech model returns text only — `ASRResult` carries no language — so
+/// the spoken language is read off the script of what came back. Cyrillic
+/// against Latin is instant, needs no second model, and is all the capsule
+/// colour needs. A genuinely mixed phrase stays `unknown`, which leaves the
+/// user's own capsule colour in place instead of guessing.
+enum SpeechLanguage: String, Sendable, Equatable {
+    case russian
+    case english
+    case unknown
+
+    /// Red for Russian, blue for English: the two colours the user asked for.
+    var hudAccent: NSColor? {
+        switch self {
+        case .russian: return NSColor(srgbRed: 0.85, green: 0.27, blue: 0.23, alpha: 1)
+        case .english: return NSColor(srgbRed: 0.18, green: 0.44, blue: 0.90, alpha: 1)
+        case .unknown: return nil
+        }
+    }
+}
+
+/// Minimum letters before a verdict: "ок", a number or a stray "hm" carry no
+/// evidence, and colouring on them would make the capsule flicker.
+let SPEECH_LANGUAGE_MIN_LETTERS = 3
+/// Share of letters the winning script needs. Two-to-one was too strict:
+/// "Открой pull request и посмотри диффы" is plainly Russian speech, yet the
+/// English terms in it keep Cyrillic under twice the Latin count.
+let SPEECH_LANGUAGE_DOMINANT_SHARE = 0.6
+
+func detectSpeechLanguage(in text: String) -> SpeechLanguage {
+    var cyrillic = 0
+    var latin = 0
+    for scalar in text.unicodeScalars {
+        switch scalar.value {
+        case 0x0410...0x044F, 0x0401, 0x0451:
+            cyrillic += 1
+        case 0x41...0x5A, 0x61...0x7A:
+            latin += 1
+        default:
+            break
+        }
+    }
+    let total = cyrillic + latin
+    guard total >= SPEECH_LANGUAGE_MIN_LETTERS else { return .unknown }
+    if Double(cyrillic) / Double(total) >= SPEECH_LANGUAGE_DOMINANT_SHARE { return .russian }
+    if Double(latin) / Double(total) >= SPEECH_LANGUAGE_DOMINANT_SHARE { return .english }
+    return .unknown
 }
 
 // MARK: - Filler word removal
@@ -9296,6 +9382,53 @@ private func openPrivateOutputFileDescriptor(atPath path: String,
     }
 }
 
+// MARK: - Palette
+//
+// AppKit's semantic colours render a neutral grey Mac panel. Planetka is meant
+// to read as part of the same family as the Claude apps, so every surface,
+// label and accent in the control panel and settings window resolves here
+// instead. Each colour carries its own dark variant; nothing is inverted
+// automatically.
+
+enum Palette {
+    private static func hex(_ value: UInt32) -> NSColor {
+        NSColor(srgbRed: CGFloat((value >> 16) & 0xFF) / 255,
+                green: CGFloat((value >> 8) & 0xFF) / 255,
+                blue: CGFloat(value & 0xFF) / 255,
+                alpha: 1)
+    }
+
+    private static func dynamic(light: UInt32, dark: UInt32) -> NSColor {
+        let lightColor = hex(light)
+        let darkColor = hex(dark)
+        return NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? darkColor : lightColor
+        }
+    }
+
+    /// Window ground.
+    static let canvas = dynamic(light: 0xFAF9F5, dark: 0x272520)
+    /// Raised blocks sitting on the canvas.
+    static let surface = dynamic(light: 0xFFFFFF, dark: 0x33302A)
+    /// Recessed blocks: field wells, inactive chips.
+    static let sunk = dynamic(light: 0xF2F0E9, dark: 0x1E1C18)
+    static let border = dynamic(light: 0xE7E3D9, dark: 0x453F35)
+    static let ink = dynamic(light: 0x1F1E1D, dark: 0xF5F2E9)
+    static let inkMuted = dynamic(light: 0x6B665D, dark: 0xB8B1A2)
+    static let inkFaint = dynamic(light: 0x97918A, dark: 0x878179)
+    /// The one saturated colour in the interface.
+    static let accent = dynamic(light: 0xD97757, dark: 0xE08A6C)
+    static let accentPressed = dynamic(light: 0xC2603F, dark: 0xC97354)
+    static let onAccent = dynamic(light: 0xFFFFFF, dark: 0x241A15)
+    static let positive = dynamic(light: 0x3F7A55, dark: 0x6FAE85)
+    static let attention = dynamic(light: 0xB4762E, dark: 0xD79A56)
+    static let danger = dynamic(light: 0xB2453A, dark: 0xE07463)
+
+    /// Hover and pressed washes, tinted with the ink rather than pure black so
+    /// they stay warm on both grounds.
+    static func inkWash(_ alpha: CGFloat) -> NSColor { ink.withAlphaComponent(alpha) }
+}
+
 // MARK: - App
 //
 // Single class that owns the lifecycle and the AppKit menu-bar UI.
@@ -9402,6 +9535,21 @@ private final class RecordingHUDView: NSView {
     }
     private var modeChangedAt = ProcessInfo.processInfo.systemUptime
 
+    /// Set once the spoken language is known; overrides the user's recording
+    /// colour for that dictation only.
+    var languageAccent: NSColor? {
+        didSet {
+            if oldValue?.isEqual(languageAccent) != true { needsDisplay = true }
+        }
+    }
+
+    /// 0…1 while the capsule collapses into the checkmark.
+    var finishProgress: CGFloat = 0 {
+        didSet {
+            if oldValue != finishProgress { needsDisplay = true }
+        }
+    }
+
     var level: Float = 0 {
         didSet {
             if oldValue != level { needsDisplay = true }
@@ -9445,8 +9593,14 @@ private final class RecordingHUDView: NSView {
         let idleBreath = 0.0032 + (0.0018 * sin(phase * 0.31))
         let voiceBreath = audio * (0.014 + (0.008 * ((sin(phase * 0.87) + 1) / 2)))
         let liveScale = 1 + ((idleBreath + voiceBreath) * breathingReady)
-        let capsuleWidth = (startDiameter + ((finalRect.width - startDiameter) * grow)) * liveScale
+        var capsuleWidth = (startDiameter + ((finalRect.width - startDiameter) * grow)) * liveScale
         let capsuleHeight = (startDiameter + ((finalRect.height - startDiameter) * grow)) * liveScale
+        if mode == .finished {
+            // The capsule pulls in to a circle before the check is drawn, so
+            // the two motions read as one gesture rather than a swap.
+            let collapse = smootherstep(0, 0.45, finishProgress)
+            capsuleWidth += (capsuleHeight - capsuleWidth) * collapse
+        }
         let capsuleRect = NSRect(x: bounds.midX - (capsuleWidth / 2),
                                  y: bounds.midY - (capsuleHeight / 2),
                                  width: capsuleWidth,
@@ -9457,11 +9611,21 @@ private final class RecordingHUDView: NSView {
         let palette = backgroundPalette(alpha: capsuleAlpha)
         palette.fill.setFill()
         capsule.fill()
+        if mode == .finished {
+            // The capsule itself goes green as it collapses; the check is then
+            // knocked out of it in white.
+            let greenFade = smootherstep(0, 0.5, finishProgress)
+            RECORDING_HUD_SUCCESS_COLOR
+                .withAlphaComponent(capsuleAlpha * greenFade)
+                .setFill()
+            capsule.fill()
+        }
         let accent: NSColor
         switch mode {
         case .transcribing: accent = transcribingColor
         case .error:        accent = .systemYellow
-        case .recording:    accent = recordingColor
+        case .finished:     accent = RECORDING_HUD_SUCCESS_COLOR
+        case .recording:    accent = languageAccent ?? recordingColor
         }
         let vividAccent = accent
         if showsCapsuleStroke {
@@ -9480,6 +9644,11 @@ private final class RecordingHUDView: NSView {
         capsule.addClip()
         context.setAlpha(contentAlpha)
         defer { NSGraphicsContext.restoreGraphicsState() }
+
+        if mode == .finished {
+            drawSuccessCheck(in: capsuleRect, progress: finishProgress)
+            return
+        }
 
         if mode == .transcribing {
             drawTranscribingWave(in: capsuleRect, alpha: 1)
@@ -9536,6 +9705,39 @@ private final class RecordingHUDView: NSView {
             vividAccent.withAlphaComponent(0.74 + (0.26 * activity)).setFill()
             path.fill()
         }
+    }
+
+    /// Checkmark stroked on as `progress` runs, so it draws itself rather than
+    /// popping in. The view is flipped, so the elbow sits at the larger y.
+    private func drawSuccessCheck(in rect: NSRect, progress: CGFloat) {
+        let reveal = smootherstep(0.35, 1, max(0, min(1, progress)))
+        guard reveal > 0.001 else { return }
+        let points = [
+            NSPoint(x: rect.minX + rect.width * 0.30, y: rect.minY + rect.height * 0.50),
+            NSPoint(x: rect.minX + rect.width * 0.44, y: rect.minY + rect.height * 0.68),
+            NSPoint(x: rect.minX + rect.width * 0.72, y: rect.minY + rect.height * 0.33),
+        ]
+        let firstLength = hypot(points[1].x - points[0].x, points[1].y - points[0].y)
+        let secondLength = hypot(points[2].x - points[1].x, points[2].y - points[1].y)
+        let drawn = (firstLength + secondLength) * reveal
+
+        let path = NSBezierPath()
+        path.move(to: points[0])
+        if drawn <= firstLength {
+            let t = firstLength > 0 ? drawn / firstLength : 1
+            path.line(to: NSPoint(x: points[0].x + (points[1].x - points[0].x) * t,
+                                  y: points[0].y + (points[1].y - points[0].y) * t))
+        } else {
+            path.line(to: points[1])
+            let t = secondLength > 0 ? min(1, (drawn - firstLength) / secondLength) : 1
+            path.line(to: NSPoint(x: points[1].x + (points[2].x - points[1].x) * t,
+                                  y: points[1].y + (points[2].y - points[1].y) * t))
+        }
+        path.lineWidth = max(1.8, min(rect.width, rect.height) * 0.11)
+        path.lineCapStyle = .round
+        path.lineJoinStyle = .round
+        NSColor.white.withAlphaComponent(0.97).setStroke()
+        path.stroke()
     }
 
     private func drawTranscribingWave(in capsuleRect: NSRect, alpha: CGFloat) {
@@ -9690,11 +9892,13 @@ private func exportRecordingHUDAnimationFrames(to directory: URL) throws {
     let emptyLead = 0.35
     let recordingDuration = 6.20
     let transcribingDuration = 2.40
+    let finishedDuration = RECORDING_HUD_FINISH_DRAW_SECONDS + RECORDING_HUD_FINISH_HOLD_SECONDS
     let emptyTail = 0.50
     let totalDuration = emptyLead
         + RECORDING_HUD_ANIMATE_IN_SECONDS
         + recordingDuration
         + transcribingDuration
+        + finishedDuration
         + RECORDING_HUD_ANIMATE_OUT_SECONDS
         + emptyTail
     let frameCount = Int((totalDuration * framesPerSecond).rounded())
@@ -9715,7 +9919,8 @@ private func exportRecordingHUDAnimationFrames(to directory: URL) throws {
             let revealStart = emptyLead
             let recordingStart = revealStart + RECORDING_HUD_ANIMATE_IN_SECONDS
             let transcribingStart = recordingStart + recordingDuration
-            let hideStart = transcribingStart + transcribingDuration
+            let finishedStart = transcribingStart + transcribingDuration
+            let hideStart = finishedStart + finishedDuration
             let tailStart = hideStart + RECORDING_HUD_ANIMATE_OUT_SECONDS
 
             let reveal: CGFloat
@@ -9741,21 +9946,27 @@ private func exportRecordingHUDAnimationFrames(to directory: URL) throws {
                 level = Float(min(0.94, 0.10 + (0.78 * syllables * phrasing * detail)))
                 mode = .recording
                 transcribingElapsed = nil
-            } else if time < hideStart {
+            } else if time < finishedStart {
                 reveal = 1
                 level = 0
                 mode = .transcribing
                 transcribingElapsed = CGFloat(time - transcribingStart)
+            } else if time < hideStart {
+                reveal = 1
+                level = 0
+                mode = .finished
+                transcribingElapsed = nil
+                view.finishProgress = CGFloat(min(1, (time - finishedStart) / RECORDING_HUD_FINISH_DRAW_SECONDS))
             } else if time < tailStart {
                 reveal = 1 - CGFloat((time - hideStart) / RECORDING_HUD_ANIMATE_OUT_SECONDS)
                 level = 0
-                mode = .transcribing
-                transcribingElapsed = CGFloat(time - transcribingStart)
+                mode = .finished
+                transcribingElapsed = nil
             } else {
                 reveal = 0
                 level = 0
-                mode = .transcribing
-                transcribingElapsed = CGFloat(time - transcribingStart)
+                mode = .finished
+                transcribingElapsed = nil
             }
 
             phase += recordingHUDPhaseSpeed(mode: mode, level: level)
@@ -10797,6 +11008,10 @@ final class PlanetkaApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let audio = AudioCapture()
     private let hotkey = HotkeyListener()
     private let asr = TranscriptionWorker()
+    /// Early language pass. Held so the final transcription can await it: the
+    /// Neural Engine refuses two inferences at once.
+    private var speechLanguageProbe: Task<Void, Never>?
+    private var recordingHUDFinishStartedAt: TimeInterval?
     private let insertionTargetTracker = FocusedInsertionTargetTracker()
     private let settings = Settings.shared
 
@@ -12128,6 +12343,44 @@ final class PlanetkaApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    /// One early pass over the speech captured so far, purely to colour the
+    /// capsule while the user is still talking. The model returns text only,
+    /// so this is the earliest moment the language can be known at all.
+    ///
+    /// It runs on the same worker as the real transcription, which is why
+    /// `handleRelease` awaits it: the Neural Engine refuses two inferences at
+    /// once, and a probe still in flight would otherwise make the dictation
+    /// itself fail.
+    private func scheduleSpeechLanguageProbe() {
+        speechLanguageProbe?.cancel()
+        guard settings.speechLanguageColors, settings.showRecordingWaveform else {
+            speechLanguageProbe = nil
+            return
+        }
+        let worker = asr
+        let capture = audio
+        let language = settings.dictationLanguage.fluidLanguage
+        speechLanguageProbe = Task { @MainActor [weak self] in
+            try? await Task.sleep(
+                nanoseconds: UInt64(SPEECH_LANGUAGE_PROBE_DELAY_SECONDS * 1_000_000_000)
+            )
+            guard let self, self.isRecording, !Task.isCancelled else { return }
+            let captured = capture.snapshotSamples()
+            // Under half a second of audio says nothing about language.
+            guard captured.count >= 8_000 else { return }
+            let requestedAt = ProcessInfo.processInfo.systemUptime
+            guard let probe = try? await worker.transcribe(samples: captured,
+                                                           language: language,
+                                                           requestedAt: requestedAt)
+            else { return }
+            guard self.isRecording else { return }
+            let detected = detectSpeechLanguage(in: probe.text)
+            guard detected != .unknown, let accent = detected.hudAccent else { return }
+            self.recordingHUDView?.languageAccent = accent
+            log("speech language: \(detected.rawValue)")
+        }
+    }
+
     private func showTranscribingHUD() {
         guard settings.showRecordingWaveform else { return }
         recordingHUDTranscribingStartedAt = ProcessInfo.processInfo.systemUptime
@@ -12230,6 +12483,11 @@ final class PlanetkaApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         lastRecordingHUDMotionAt = now
 
         advanceRecordingHUDRevealAnimation(at: now)
+        if recordingHUDView?.mode == .finished, let startedAt = recordingHUDFinishStartedAt {
+            let elapsed = now - startedAt
+            recordingHUDView?.finishProgress =
+                CGFloat(min(1, elapsed / RECORDING_HUD_FINISH_DRAW_SECONDS))
+        }
         let mode = recordingHUDView?.mode
             ?? ((isBusy && !isRecording) ? .transcribing : .recording)
         let speed = recordingHUDPhaseSpeed(mode: mode, level: recordingVisualLevel)
@@ -12672,7 +12930,10 @@ final class PlanetkaApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return NSRect(x: x, y: y, width: frame.width, height: frame.height)
     }
 
-    private func finishBusyHUD() {
+    private func finishBusyHUD(succeeded: Bool = false) {
+        if succeeded, showFinishedHUD() {
+            return
+        }
         if let startedAt = recordingHUDTranscribingStartedAt {
             let elapsed = ProcessInfo.processInfo.systemUptime - startedAt
             let remaining = RECORDING_HUD_TRANSCRIBING_MIN_VISIBLE_SECONDS - elapsed
@@ -12690,6 +12951,32 @@ final class PlanetkaApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         recordingHUDTranscribingStartedAt = nil
         hideRecordingHUD()
+    }
+
+    /// Green capsule collapsing into a checkmark: the dictation landed. Returns
+    /// false when there is no visible HUD to turn green, so the caller falls
+    /// back to hiding it the ordinary way.
+    @discardableResult
+    private func showFinishedHUD() -> Bool {
+        guard settings.showRecordingWaveform,
+              let view = recordingHUDView,
+              recordingHUDPanel?.isVisible == true else { return false }
+        recordingHUDTranscribingStartedAt = nil
+        view.languageAccent = nil
+        view.finishProgress = 0
+        view.mode = .finished
+        recordingHUDFinishStartedAt = ProcessInfo.processInfo.systemUptime
+        startRecordingHUDMotion()
+        let visible = RECORDING_HUD_FINISH_DRAW_SECONDS + RECORDING_HUD_FINISH_HOLD_SECONDS
+        DispatchQueue.main.asyncAfter(deadline: .now() + visible) { [weak self] in
+            guard let self,
+                  self.recordingHUDView?.mode == .finished,
+                  !self.isRecording,
+                  !self.isBusy else { return }
+            self.recordingHUDFinishStartedAt = nil
+            self.hideRecordingHUD()
+        }
+        return true
     }
 
     // Visible + audible cue that a press produced no pasted text — the
@@ -12780,6 +13067,8 @@ final class PlanetkaApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             updateSetupChecklist()
         }
         startRecordingLevelMeter(initialContext: initialInsertionContext)
+        recordingHUDView?.languageAccent = nil
+        scheduleSpeechLanguageProbe()
         if settings.playFeedbackSounds {
             Sounds.playStart()
         }
@@ -12844,7 +13133,11 @@ final class PlanetkaApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let asrRequestedAt = ProcessInfo.processInfo.systemUptime
         let transcriptionWorker = asr
         let language = settings.dictationLanguage.fluidLanguage
+        let pendingLanguageProbe = speechLanguageProbe
+        speechLanguageProbe = nil
         let transcriptionTask = Task.detached(priority: .userInitiated) {
+            // Never overlap with the language probe: one inference at a time.
+            await pendingLanguageProbe?.value
             let transcription = try await transcriptionWorker.transcribe(
                 samples: samples,
                 language: language,
@@ -13000,7 +13293,7 @@ final class PlanetkaApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 dictationFailed = true
             }
             isBusy = false
-            finishBusyHUD()
+            finishBusyHUD(succeeded: !dictationFailed && !isTerminating)
             if dictationFailed && !isTerminating {
                 signalDictationFailure()
             } else {
@@ -17233,6 +17526,8 @@ private enum PlanetkaSelfTest {
             return runSuite("insertion-target", testInsertionTargetTracking)
         case "legacy-rename":
             return runSuite("legacy-rename", testLegacyRenameMigration)
+        case "speech-language":
+            return runSuite("speech-language", testSpeechLanguageDetection)
         case "insertion-target-live":
             return runSuite("insertion-target-live", testLiveInsertionTargetProbe)
         case "all":
@@ -17281,6 +17576,7 @@ private enum PlanetkaSelfTest {
         try testDiagnostics()
         try testInsertionTargetTracking()
         try testLegacyRenameMigration()
+        try testSpeechLanguageDetection()
     }
 
     private static func testAICleanup() throws {
@@ -19696,6 +19992,45 @@ private enum PlanetkaSelfTest {
         let leadingBang = FillerWordRemover.apply(to: "Ah! Careful.")
         try expect(leadingBang.text, equals: "Careful.", "leading filler exclamation should take its punctuation with it")
         try expect(leadingBang.removedCount, equals: 1, "leading filler exclamation removal count")
+    }
+
+    private static func testSpeechLanguageDetection() throws {
+        try expect(detectSpeechLanguage(in: "Привет, как дела"), equals: .russian,
+                   "Cyrillic speech should read as Russian")
+        try expect(detectSpeechLanguage(in: "Hello there, how are you"), equals: .english,
+                   "Latin speech should read as English")
+        try expect(detectSpeechLanguage(in: "Открой pull request и посмотри диффы"),
+                   equals: .russian,
+                   "Russian speech carrying English terms should stay Russian")
+        try expect(detectSpeechLanguage(in: "Push the коммит please"), equals: .english,
+                   "English speech carrying a Russian word should stay English")
+        try expect(detectSpeechLanguage(in: "Привет hello"), equals: .unknown,
+                   "an evenly mixed phrase should not guess")
+        try expect(detectSpeechLanguage(in: "ок"), equals: .unknown,
+                   "two letters are not evidence of a language")
+        try expect(detectSpeechLanguage(in: "12 345 —"), equals: .unknown,
+                   "digits and punctuation carry no language")
+        try expect(detectSpeechLanguage(in: ""), equals: .unknown,
+                   "empty transcript should not colour the capsule")
+
+        try expect(SpeechLanguage.unknown.hudAccent == nil, equals: true,
+                   "an unknown language must leave the user's own colour alone")
+        let russian = try XCTUnwrapAccent(SpeechLanguage.russian)
+        let english = try XCTUnwrapAccent(SpeechLanguage.english)
+        try expect(russian.redComponent > russian.blueComponent, equals: true,
+                   "Russian should be the red capsule")
+        try expect(english.blueComponent > english.redComponent, equals: true,
+                   "English should be the blue capsule")
+
+        try expect(recordingHUDPhaseSpeed(mode: .finished, level: 1), equals: 0,
+                   "the finished capsule is a still frame")
+    }
+
+    private static func XCTUnwrapAccent(_ language: SpeechLanguage) throws -> NSColor {
+        guard let accent = language.hudAccent?.usingColorSpace(.sRGB) else {
+            throw SelfTestFailure.failed("\(language.rawValue) should carry a capsule colour")
+        }
+        return accent
     }
 
     private static func testLegacyRenameMigration() throws {
@@ -22459,6 +22794,7 @@ private struct ControlPanelSettingsDraft: Equatable {
     var aiCleanupModel: String
     var inputDevicePreference: String
     var removeFinalPeriod: Bool
+    var speechLanguageColors: Bool
     var recordingColor: RecordingHUDAccentColor
     var transcribingColor: RecordingHUDAccentColor
     var backgroundStyle: RecordingHUDBackgroundStyle
@@ -22477,6 +22813,7 @@ private struct ControlPanelSettingsDraft: Equatable {
         let savedInput = settings.inputDevice
         inputDevicePreference = audioInputDevice(matching: savedInput)?.uid ?? savedInput
         removeFinalPeriod = settings.removeFinalPeriod
+        speechLanguageColors = settings.speechLanguageColors
         recordingColor = settings.recordingHUDRecordingColor
         transcribingColor = settings.recordingHUDTranscribingColor
         backgroundStyle = settings.recordingHUDBackgroundStyle
@@ -22515,6 +22852,108 @@ private func settingsWindowContentHeight(visibleScreenHeight: CGFloat?) -> CGFlo
 @MainActor
 private final class SettingsDocumentView: NSView {
     override var isFlipped: Bool { true }
+}
+
+/// Layer-backed block that re-resolves its palette colours whenever the system
+/// appearance flips. Assigning `cgColor` once would freeze the light variant.
+private final class PaletteBlock: NSView {
+    var fill: NSColor?
+    var stroke: NSColor?
+    var radius: CGFloat = 0
+
+    init(fill: NSColor?, stroke: NSColor? = nil, radius: CGFloat = 0) {
+        self.fill = fill
+        self.stroke = stroke
+        self.radius = radius
+        super.init(frame: .zero)
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.backgroundColor = fill?.cgColor ?? NSColor.clear.cgColor
+        layer?.cornerRadius = radius
+        layer?.borderWidth = stroke == nil ? 0 : 1
+        layer?.borderColor = stroke?.cgColor
+    }
+}
+
+/// Push button drawn from the palette instead of the system bezel: a filled
+/// accent button for the one action a panel state suggests, and a quiet
+/// bordered one for everything else.
+private final class PaletteButton: NSButton {
+    enum Kind { case accent, quiet }
+
+    private let kind: Kind
+    private var hovering = false
+
+    init(title: String, kind: Kind, target: AnyObject?, action: Selector) {
+        self.kind = kind
+        super.init(frame: .zero)
+        self.title = title
+        self.target = target
+        self.action = action
+        isBordered = false
+        wantsLayer = true
+        setButtonType(.momentaryChange)
+        font = .systemFont(ofSize: 12, weight: .medium)
+        setContentHuggingPriority(.required, for: .horizontal)
+        translatesAutoresizingMaskIntoConstraints = false
+        heightAnchor.constraint(equalToConstant: 26).isActive = true
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override var intrinsicContentSize: NSSize {
+        var size = super.intrinsicContentSize
+        size.width += 22
+        size.height = 26
+        return size
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        let pressed = isHighlighted
+        let fill: NSColor
+        let stroke: NSColor?
+        let ink: NSColor
+        switch kind {
+        case .accent:
+            fill = pressed ? Palette.accentPressed : Palette.accent
+            stroke = nil
+            ink = Palette.onAccent
+        case .quiet:
+            fill = pressed ? Palette.inkWash(0.10) : (hovering ? Palette.inkWash(0.05) : Palette.surface)
+            stroke = Palette.border
+            ink = Palette.ink
+        }
+        layer?.cornerRadius = 7
+        layer?.backgroundColor = fill.withAlphaComponent(isEnabled ? 1 : 0.45).cgColor
+        layer?.borderWidth = stroke == nil ? 0 : 1
+        layer?.borderColor = stroke?.cgColor
+        attributedTitle = NSAttributedString(
+            string: title,
+            attributes: [
+                .font: font ?? NSFont.systemFont(ofSize: 12, weight: .medium),
+                .foregroundColor: ink.withAlphaComponent(isEnabled ? 1 : 0.5),
+            ]
+        )
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds,
+                                       options: [.mouseEnteredAndExited, .activeInActiveApp],
+                                       owner: self))
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovering = true; needsDisplay = true }
+    override func mouseExited(with event: NSEvent) { hovering = false; needsDisplay = true }
 }
 
 @MainActor
@@ -22745,20 +23184,30 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         let root = NSStackView()
         root.orientation = .vertical
         root.alignment = .leading
-        root.spacing = 10
-        root.edgeInsets = NSEdgeInsets(top: 18, left: 20, bottom: 16, right: 20)
+        root.spacing = 14
+        root.edgeInsets = NSEdgeInsets(top: 22, left: 24, bottom: 18, right: 24)
         root.translatesAutoresizingMaskIntoConstraints = false
 
-        root.addArrangedSubview(compactHeaderView())
-        root.addArrangedSubview(compactServiceCard())
-        root.addArrangedSubview(compactPermissionsCard())
-        root.addArrangedSubview(compactUpdateCard())
-        root.addArrangedSubview(compactPrivacyFooter())
+        let header = compactHeaderView()
+        let service = compactServiceCard()
+        let firstRule = hairline()
+        let permissions = compactPermissionsCard()
+        let secondRule = hairline()
+        let update = compactUpdateCard()
+        let footer = compactPrivacyFooter()
+        for view in [header, service, firstRule, permissions, secondRule, update, footer] {
+            root.addArrangedSubview(view)
+        }
+        // A rule belongs to the gap, not to the block above it, so it sits with
+        // equal air on both sides while the blocks keep their own rhythm.
+        root.setCustomSpacing(20, after: header)
+        root.setCustomSpacing(15, after: service)
+        root.setCustomSpacing(15, after: firstRule)
+        root.setCustomSpacing(15, after: permissions)
+        root.setCustomSpacing(15, after: secondRule)
+        root.setCustomSpacing(18, after: update)
 
-        let background = NSVisualEffectView()
-        background.material = .underWindowBackground
-        background.blendingMode = .behindWindow
-        background.state = .active
+        let background = PaletteBlock(fill: Palette.canvas)
         background.addSubview(root)
 
         NSLayoutConstraint.activate([
@@ -22813,8 +23262,10 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         root.addArrangedSubview(panelLabel(t("Обработка текста", "Text processing"),
                                            size: 12,
                                            weight: .semibold,
-                                           color: .secondaryLabelColor))
+                                           color: Palette.inkMuted))
         root.addArrangedSubview(removeFinalPeriodRow(draft))
+        root.addArrangedSubview(separator())
+        root.addArrangedSubview(speechLanguageColorsRow(draft))
         root.addArrangedSubview(separator())
         root.addArrangedSubview(popupRow(
             title: t("Размер капсулы", "Capsule size"),
@@ -22912,41 +23363,83 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         let text = NSStackView()
         text.orientation = .vertical
         text.alignment = .leading
-        text.spacing = 1
-        text.addArrangedSubview(panelLabel("Planetka", size: 20, weight: .semibold))
+        text.spacing = 3
+        text.addArrangedSubview(panelLabel("Planetka", size: 27, weight: .semibold, serif: true))
         text.addArrangedSubview(panelLabel(
             t("Локальная диктовка · работает в фоне", "Local dictation · runs in the background"),
-            size: 11.5,
-            color: .secondaryLabelColor
+            size: 12,
+            color: Palette.inkMuted
         ))
 
-        let version = panelLabel("v\(currentBundleVersion())", size: 11, color: .tertiaryLabelColor)
-        version.setContentHuggingPriority(.required, for: .horizontal)
-        version.toolTip = t("Установленная версия Planetka", "Installed Planetka version")
-
-        let languageControl = NSSegmentedControl(labels: ["RU", "EN"],
-                                                 trackingMode: .selectOne,
-                                                 target: self,
-                                                 action: #selector(selectInterfaceLanguage(_:)))
-        languageControl.selectedSegment = language == .russian ? 0 : 1
-        languageControl.controlSize = .small
-        languageControl.toolTip = t("Язык панели и настроек", "Panel and settings language")
-        languageControl.setContentHuggingPriority(.required, for: .horizontal)
-
         let settingsButton = compactIconButton(
-            symbol: "gearshape.fill",
+            symbol: "gearshape",
             accessibilityTitle: t("Открыть настройки", "Open Settings"),
             toolTip: t("Открыть настройки диктовки и внешний вид индикатора",
                        "Open dictation and indicator appearance settings"),
             action: #selector(openSettingsClicked(_:))
         )
 
+        let controls = NSStackView()
+        controls.orientation = .horizontal
+        controls.alignment = .centerY
+        controls.spacing = 8
+        controls.addArrangedSubview(versionChip())
+        controls.addArrangedSubview(languageToggle())
+        controls.addArrangedSubview(settingsButton)
+
         row.addArrangedSubview(text)
         row.addArrangedSubview(NSView())
-        row.addArrangedSubview(version)
-        row.addArrangedSubview(languageControl)
-        row.addArrangedSubview(settingsButton)
+        row.addArrangedSubview(controls)
         return row
+    }
+
+    /// Two-state track rather than an NSSegmentedControl: the system control
+    /// keeps its own grey chrome and would be the one Mac-looking part left in
+    /// the header.
+    private func languageToggle() -> NSView {
+        let track = PaletteBlock(fill: Palette.sunk, stroke: Palette.border, radius: 7)
+        track.translatesAutoresizingMaskIntoConstraints = false
+        track.toolTip = t("Язык панели и настроек", "Panel and settings language")
+
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 2
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        for (index, code) in ["RU", "EN"].enumerated() {
+            let isSelected = (index == 0) == (language == .russian)
+            let button = NSButton(title: code, target: self, action: #selector(languageToggleClicked(_:)))
+            button.tag = index
+            button.isBordered = false
+            button.wantsLayer = true
+            button.setButtonType(.momentaryChange)
+            button.attributedTitle = NSAttributedString(
+                string: code,
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: 10.5, weight: .semibold),
+                    .foregroundColor: isSelected ? Palette.ink : Palette.inkFaint,
+                ]
+            )
+            button.layer?.cornerRadius = 5
+            button.layer?.backgroundColor = (isSelected ? Palette.surface : NSColor.clear).cgColor
+            button.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                button.widthAnchor.constraint(equalToConstant: 27),
+                button.heightAnchor.constraint(equalToConstant: 18),
+            ])
+            row.addArrangedSubview(button)
+        }
+
+        track.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: track.leadingAnchor, constant: 3),
+            row.trailingAnchor.constraint(equalTo: track.trailingAnchor, constant: -3),
+            row.topAnchor.constraint(equalTo: track.topAnchor, constant: 3),
+            row.bottomAnchor.constraint(equalTo: track.bottomAnchor, constant: -3),
+        ])
+        track.setContentHuggingPriority(.required, for: .horizontal)
+        return track
     }
 
     private func settingsHeaderView() -> NSView {
@@ -22959,16 +23452,16 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         text.orientation = .vertical
         text.alignment = .leading
         text.spacing = 2
-        text.addArrangedSubview(panelLabel(t("Настройки", "Settings"), size: 20, weight: .semibold))
+        text.addArrangedSubview(panelLabel(t("Настройки", "Settings"), size: 23, weight: .semibold, serif: true))
         text.addArrangedSubview(panelLabel(
             t("Изменения применяются после сохранения — перезапуск модели не нужен.",
               "Changes apply after saving; the speech model does not need to restart."),
             size: 11.5,
-            color: .secondaryLabelColor
+            color: Palette.inkMuted
         ))
         row.addArrangedSubview(text)
         row.addArrangedSubview(NSView())
-        row.addArrangedSubview(panelLabel("v\(currentBundleVersion())", size: 11, color: .tertiaryLabelColor))
+        row.addArrangedSubview(panelLabel("v\(currentBundleVersion())", size: 11, color: Palette.inkFaint))
         return row
     }
 
@@ -22976,17 +23469,13 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         let running = PlanetkaAgentService.isAgentRunning()
         let state = AgentRuntimeStateStore.read()
         let presentation = servicePresentation(running: running, state: state)
-        let card = compactCard()
         let row = NSStackView()
         row.orientation = .horizontal
         row.alignment = .centerY
-        row.spacing = 12
-        row.translatesAutoresizingMaskIntoConstraints = false
+        row.spacing = 10
 
-        let icon = panelSymbol(running ? "waveform.circle.fill" : "waveform.circle",
-                               color: presentation.color,
-                               description: t("Состояние службы", "Service status"),
-                               pointSize: 25)
+        let icon = statusDot(presentation.color)
+        icon.toolTip = t("Состояние службы", "Service status")
         let text = NSStackView()
         text.orientation = .vertical
         text.alignment = .leading
@@ -23009,7 +23498,7 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         let detail = panelLabel(
             detailText,
             size: 11.5,
-            color: .secondaryLabelColor
+            color: Palette.inkMuted
         )
         detail.maximumNumberOfLines = showsModelProgress ? 3 : 2
         detail.lineBreakMode = showsModelProgress ? .byWordWrapping : .byTruncatingTail
@@ -23082,48 +23571,32 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         row.addArrangedSubview(text)
         row.addArrangedSubview(NSView())
         row.addArrangedSubview(actions)
-        pin(row, inside: card, horizontal: 14, vertical: 11)
-        card.toolTip = presentation.detail
-        return card
+        row.toolTip = presentation.detail
+        return section(t("Служба", "Service"), content: row)
     }
 
     private func compactPermissionsCard() -> NSView {
         let missing = Permission.allCases.filter { !Permissions.isGranted($0) }
-        let card = compactCard()
         let content = NSStackView()
         content.orientation = .vertical
         content.alignment = .leading
-        content.spacing = 7
-        content.translatesAutoresizingMaskIntoConstraints = false
+        content.spacing = 8
 
-        let header = NSStackView()
-        header.orientation = .horizontal
-        header.alignment = .centerY
-        header.spacing = 8
-        let color: NSColor = missing.isEmpty ? .systemGreen : .systemOrange
-        header.addArrangedSubview(panelSymbol(missing.isEmpty ? "checkmark.shield.fill" : "exclamationmark.shield.fill",
-                                              color: color,
-                                              description: t("Разрешения macOS", "macOS permissions"),
-                                              pointSize: 15))
-        header.addArrangedSubview(panelLabel(t("Разрешения macOS", "macOS permissions"),
-                                             size: 12.5,
-                                             weight: .semibold))
-        header.addArrangedSubview(NSView())
-        header.addArrangedSubview(panelLabel(
+        let color: NSColor = missing.isEmpty ? Palette.positive : Palette.attention
+        let verdict = panelLabel(
             missing.isEmpty ? t("Все выданы", "All granted")
                             : t("Нужно: \(missing.count)", "Missing: \(missing.count)"),
-            size: 11.5,
-            weight: .medium,
+            size: 11,
+            weight: .semibold,
             color: color
-        ))
-        content.addArrangedSubview(header)
+        )
 
         if missing.isEmpty {
             let ready = panelLabel(
                 t("Микрофон, вставка текста и глобальный хоткей доступны.",
                   "Microphone, text insertion, and the global shortcut are available."),
                 size: 11,
-                color: .secondaryLabelColor
+                color: Palette.inkMuted
             )
             ready.toolTip = t("Planetka получил все три необходимых разрешения macOS.",
                               "Planetka has all three required macOS permissions.")
@@ -23133,8 +23606,9 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
                 content.addArrangedSubview(compactPermissionRow(permission))
             }
         }
-        pin(content, inside: card, horizontal: 13, vertical: 10)
-        return card
+        return section(t("Разрешения macOS", "macOS permissions"),
+                       accessory: verdict,
+                       content: content)
     }
 
     private func compactPermissionRow(_ permission: Permission) -> NSView {
@@ -23150,8 +23624,8 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
                                  action: #selector(grantPermissionClicked(_:)),
                                  enabled: serviceOperation == nil,
                                  toolTip: t("Открыть системное разрешение: \(permissionTitle(permission))",
-                                            "Open the system permission: \(permissionTitle(permission))"))
-        button.controlSize = .small
+                                            "Open the system permission: \(permissionTitle(permission))"),
+                                 kind: .accent)
         button.tag = Permission.allCases.firstIndex(of: permission) ?? -1
         row.addArrangedSubview(title)
         row.addArrangedSubview(NSView())
@@ -23160,24 +23634,19 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
     }
 
     private func compactUpdateCard() -> NSView {
-        let card = compactCard()
         let row = NSStackView()
         row.orientation = .horizontal
         row.alignment = .centerY
-        row.spacing = 11
-        row.translatesAutoresizingMaskIntoConstraints = false
+        row.spacing = 10
 
         let presentation = compactUpdatePresentation()
-        row.addArrangedSubview(panelSymbol(presentation.symbol,
-                                           color: presentation.color,
-                                           description: t("Обновления", "Updates"),
-                                           pointSize: 17))
+        row.addArrangedSubview(statusDot(presentation.color))
         let text = NSStackView()
         text.orientation = .vertical
         text.alignment = .leading
         text.spacing = 1
         text.addArrangedSubview(panelLabel(presentation.title, size: 12.5, weight: .semibold))
-        let detail = panelLabel(presentation.detail, size: 11, color: .secondaryLabelColor)
+        let detail = panelLabel(presentation.detail, size: 11, color: Palette.inkMuted)
         detail.maximumNumberOfLines = 1
         detail.lineBreakMode = .byTruncatingTail
         detail.toolTip = presentation.detail
@@ -23186,15 +23655,13 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         row.addArrangedSubview(NSView())
         if let buttonTitle = presentation.buttonTitle,
            let action = presentation.action {
-            let button = panelButton(buttonTitle,
-                                     action: action,
-                                     enabled: presentation.buttonEnabled,
-                                     toolTip: presentation.buttonToolTip)
-            button.controlSize = .small
-            row.addArrangedSubview(button)
+            row.addArrangedSubview(panelButton(buttonTitle,
+                                               action: action,
+                                               enabled: presentation.buttonEnabled,
+                                               toolTip: presentation.buttonToolTip,
+                                               kind: .accent))
         }
-        pin(row, inside: card, horizontal: 13, vertical: 9)
-        return card
+        return section(t("Обновление", "Update"), content: row)
     }
 
     private func compactUpdatePresentation() -> (symbol: String,
@@ -23207,19 +23674,19 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
                                                    buttonToolTip: String?) {
         switch updateState {
         case .checking:
-            return ("arrow.triangle.2.circlepath", .systemBlue,
+            return ("arrow.triangle.2.circlepath", Palette.accent,
                     t("Проверяю обновления", "Checking for updates"),
                     t("Установлена v\(currentBundleVersion())", "Installed v\(currentBundleVersion())"),
                     nil, nil, false, nil)
         case .upToDate:
-            return ("checkmark.circle.fill", .systemGreen,
+            return ("checkmark.circle.fill", Palette.positive,
                     t("Planetka актуален", "Planetka is up to date"),
                     t("Установлена последняя версия v\(currentBundleVersion())",
                       "Latest version v\(currentBundleVersion()) is installed"),
                     t("Проверить", "Check"), #selector(updateButtonClicked(_:)), true,
                     t("Проверить GitHub Releases ещё раз", "Check GitHub Releases again"))
         case .available(let release):
-            return ("arrow.down.circle.fill", .systemBlue,
+            return ("arrow.down.circle.fill", Palette.accent,
                     t("Доступна версия v\(release.version)", "Version v\(release.version) is available"),
                     t("Скачается, проверится и установится автоматически",
                       "Downloads, verifies, and installs automatically"),
@@ -23227,11 +23694,11 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
                     t("Обновить Planetka до v\(release.version) одной кнопкой",
                       "Update Planetka to v\(release.version) with one click"))
         case .preparing(let version, let phase):
-            return ("arrow.down.circle", .systemBlue,
+            return ("arrow.down.circle", Palette.accent,
                     t("Обновляю до v\(version)", "Updating to v\(version)"),
                     phase, nil, nil, false, nil)
         case .failed(let message):
-            return ("exclamationmark.triangle.fill", .systemRed,
+            return ("exclamationmark.triangle.fill", Palette.danger,
                     t("Обновление не проверено", "Update check failed"),
                     message,
                     t("Повторить", "Retry"), #selector(updateButtonClicked(_:)), true,
@@ -23245,14 +23712,14 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         row.alignment = .centerY
         row.spacing = 7
         row.addArrangedSubview(panelSymbol("xmark.circle",
-                                           color: .tertiaryLabelColor,
+                                           color: Palette.inkFaint,
                                            description: nil,
                                            pointSize: 10))
         let label = panelLabel(
             t("Панель можно закрыть — диктовка продолжит работать в фоне.",
               "You can close this panel — dictation keeps running in the background."),
             size: 10.5,
-            color: .tertiaryLabelColor
+            color: Palette.inkFaint
         )
         label.toolTip = t("Это только панель управления. Аудио и распознавание остаются на Mac.",
                           "This is only the control panel. Audio and transcription stay on this Mac.")
@@ -23295,13 +23762,13 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
                         localizedServiceDetail(state),
                         colorForStatus(state.status))
             }
-            return (operationTitle(operation), operationDetail(operation), .systemBlue)
+            return (operationTitle(operation), operationDetail(operation), Palette.accent)
         }
         if running, let state {
             if ["ready", "recording", "transcribing"].contains(state.status) {
                 return (t("Работает", "Running"),
                         t("Фоновая служба включена.", "The background service is running."),
-                        .systemGreen)
+                        Palette.positive)
             }
             if state.status == "starting" {
                 return (localizedStartupStatus(state),
@@ -23313,12 +23780,12 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         if running {
             return (t("Запускается", "Starting"),
                     t("Фоновый процесс запущен и готовит модель.", "The background process is preparing the model."),
-                    .systemOrange)
+                    Palette.attention)
         }
         return (settings.agentEnabled ? t("Остановлена", "Stopped") : t("Выключена", "Off"),
                 t("Хоткей не работает, пока служба не запущена.",
                   "The shortcut is unavailable until the service starts."),
-                settings.agentEnabled ? .systemRed : .secondaryLabelColor)
+                settings.agentEnabled ? Palette.danger : Palette.inkMuted)
     }
 
     private func checkForUpdates() {
@@ -23528,7 +23995,7 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         text.alignment = .leading
         text.spacing = 3
         text.addArrangedSubview(panelLabel(title, size: 13, weight: .semibold))
-        let detailLabel = panelLabel(detail, size: 12, color: .secondaryLabelColor)
+        let detailLabel = panelLabel(detail, size: 12, color: Palette.inkMuted)
         detailLabel.preferredMaxLayoutWidth = 440
         text.addArrangedSubview(detailLabel)
 
@@ -23590,7 +24057,7 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
             t("Что сделать после вставки распознанного текста.",
               "What to do after inserting the transcribed text."),
             size: 12,
-            color: .secondaryLabelColor
+            color: Palette.inkMuted
         ))
 
         let control = NSSegmentedControl(
@@ -23633,7 +24100,7 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
             t("Дополнительный хоткей работает только во время записи.",
               "The alternative shortcut only works while recording."),
             size: 12,
-            color: .secondaryLabelColor
+            color: Palette.inkMuted
         ))
 
         let toggle = NSSwitch()
@@ -23698,7 +24165,7 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
             t("Необязательно: после распознавания текст отправляется на OpenAI-совместимый сервер для исправления грамматики и пунктуации. По умолчанию выключено.",
               "Optional: after transcription the text is sent to an OpenAI-compatible endpoint to fix grammar and punctuation. Off by default."),
             size: 12,
-            color: .secondaryLabelColor
+            color: Palette.inkMuted
         )
         detail.preferredMaxLayoutWidth = 620
         section.addArrangedSubview(detail)
@@ -23788,7 +24255,7 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
             t("Внимание: продиктованный текст отправляется выбранному провайдеру. Бесплатные тарифы (например, OpenCode Zen) могут сохранять отправленный текст для улучшения модели — перед диктовкой личных текстов проверьте политику данных провайдера.",
               "Note: dictated text is sent to the configured provider. Free tiers (e.g. OpenCode Zen) may retain submitted text for model improvement — check your provider's data policy before dictating personal content."),
             size: 11.5,
-            color: .secondaryLabelColor
+            color: Palette.inkMuted
         )
         privacyNote.preferredMaxLayoutWidth = 620
         section.addArrangedSubview(privacyNote)
@@ -23798,7 +24265,7 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
                                 action: #selector(openAIProviderDocsClicked(_:)))
         docsLink.isBordered = false
         docsLink.font = .systemFont(ofSize: 11.5)
-        docsLink.contentTintColor = .systemBlue
+        docsLink.contentTintColor = Palette.accent
         docsLink.toolTip = "https://console.groq.com/keys"
         docsLink.setContentHuggingPriority(.required, for: .horizontal)
         section.addArrangedSubview(docsLink)
@@ -23843,7 +24310,7 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         text.addArrangedSubview(panelLabel(t("Микрофон", "Microphone"),
                                            size: 13,
                                            weight: .semibold))
-        let detail = panelLabel(detailText, size: 12, color: .secondaryLabelColor)
+        let detail = panelLabel(detailText, size: 12, color: Palette.inkMuted)
         detail.maximumNumberOfLines = 2
         detail.lineBreakMode = .byWordWrapping
         text.addArrangedSubview(detail)
@@ -23886,6 +24353,45 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         return row
     }
 
+    private func speechLanguageColorsRow(_ draft: ControlPanelSettingsDraft) -> NSView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 14
+
+        let text = NSStackView()
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = 3
+        text.addArrangedSubview(panelLabel(t("Цвет капсулы по языку речи", "Colour the capsule by spoken language"),
+                                           size: 13,
+                                           weight: .semibold))
+        let detail = panelLabel(
+            t("Русская речь — красная капсула, английская — синяя. Язык определяется через секунду после начала речи. Выключено — работает ваш цвет записи.",
+              "Russian speech turns the capsule red, English turns it blue. The language is known about a second in. Off leaves your own recording colour in place."),
+            size: 12,
+            color: Palette.inkMuted
+        )
+        detail.maximumNumberOfLines = 3
+        detail.lineBreakMode = .byWordWrapping
+        detail.preferredMaxLayoutWidth = 500
+        text.addArrangedSubview(detail)
+
+        let toggle = NSSwitch()
+        toggle.target = self
+        toggle.action = #selector(toggleSpeechLanguageColors(_:))
+        toggle.state = draft.speechLanguageColors ? .on : .off
+        toggle.isEnabled = serviceOperation == nil
+        toggle.toolTip = t("Определять язык речи и красить капсулу записи в его цвет.",
+                           "Detect the spoken language and colour the recording capsule with it.")
+        toggle.setContentHuggingPriority(.required, for: .horizontal)
+
+        row.addArrangedSubview(text)
+        row.addArrangedSubview(NSView())
+        row.addArrangedSubview(toggle)
+        return row
+    }
+
     private func removeFinalPeriodRow(_ draft: ControlPanelSettingsDraft) -> NSView {
         let row = NSStackView()
         row.orientation = .horizontal
@@ -23903,7 +24409,7 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
             t("Убирает только последнюю точку. !, ?, многоточия и точки внутри текста сохраняются.",
               "Removes only the final period. !, ?, ellipses, and periods inside the text remain."),
             size: 12,
-            color: .secondaryLabelColor
+            color: Palette.inkMuted
         )
         detail.maximumNumberOfLines = 2
         detail.lineBreakMode = .byWordWrapping
@@ -23947,7 +24453,7 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
             t("Только если доступы macOS сломались после переустановки. Все три разрешения придётся выдать заново.",
               "Use only when macOS permissions became stuck after reinstalling. All three permissions must be granted again."),
             size: 12,
-            color: .secondaryLabelColor
+            color: Palette.inkMuted
         )
         detail.maximumNumberOfLines = 2
         detail.preferredMaxLayoutWidth = 470
@@ -23986,7 +24492,7 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         text.alignment = .leading
         text.spacing = 3
         text.addArrangedSubview(panelLabel(title, size: 13, weight: .semibold))
-        text.addArrangedSubview(panelLabel(detail, size: 12, color: .secondaryLabelColor))
+        text.addArrangedSubview(panelLabel(detail, size: 12, color: Palette.inkMuted))
 
         let popup = NSPopUpButton()
         popup.target = self
@@ -24028,7 +24534,7 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
                 : t("Все изменения сохранены", "All changes are saved")),
             size: 11.5,
             weight: .medium,
-            color: validation == nil ? .secondaryLabelColor : .systemRed
+            color: validation == nil ? Palette.inkMuted : Palette.danger
         )
         message.toolTip = validation
         row.addArrangedSubview(message)
@@ -24099,25 +24605,35 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         row.spacing = 8
         let icon = NSImageView(image: NSImage(systemSymbolName: "lock.shield.fill",
                                               accessibilityDescription: nil) ?? NSImage())
-        icon.contentTintColor = .secondaryLabelColor
+        icon.contentTintColor = Palette.inkMuted
         row.addArrangedSubview(icon)
         let label = panelLabel(
             t("Аудио и распознавание остаются на Mac. Интернет нужен для первой загрузки модели, обновлений и — если включена AI-чистка — для отправки текста на выбранный вами сервер.",
               "Audio and transcription stay on this Mac. Internet is used for the first model download, updates, and — only if AI cleanup is enabled — to send text to the endpoint you configured."),
             size: 11.5,
-            color: .secondaryLabelColor
+            color: Palette.inkMuted
         )
         label.preferredMaxLayoutWidth = 600
         row.addArrangedSubview(label)
         return row
     }
 
+    /// Claude sets its headings in a serif; macOS ships New York, reachable
+    /// through the system font's serif design. Everything else stays SF.
+    private func displayFont(size: CGFloat, weight: NSFont.Weight) -> NSFont {
+        let base = NSFont.systemFont(ofSize: size, weight: weight)
+        guard let descriptor = base.fontDescriptor.withDesign(.serif) else { return base }
+        return NSFont(descriptor: descriptor, size: size) ?? base
+    }
+
     private func panelLabel(_ text: String,
                             size: CGFloat,
                             weight: NSFont.Weight = .regular,
-                            color: NSColor = .labelColor) -> NSTextField {
+                            color: NSColor = Palette.ink,
+                            serif: Bool = false) -> NSTextField {
         let label = NSTextField(labelWithString: text)
-        label.font = .systemFont(ofSize: size, weight: weight)
+        label.font = serif ? displayFont(size: size, weight: weight)
+                           : .systemFont(ofSize: size, weight: weight)
         label.textColor = color
         label.lineBreakMode = .byWordWrapping
         label.maximumNumberOfLines = 0
@@ -24127,13 +24643,11 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
     private func panelButton(_ title: String,
                              action: Selector,
                              enabled: Bool = true,
-                             toolTip: String? = nil) -> NSButton {
-        let button = NSButton(title: title, target: self, action: action)
-        button.bezelStyle = .rounded
-        button.controlSize = .regular
+                             toolTip: String? = nil,
+                             kind: PaletteButton.Kind = .quiet) -> NSButton {
+        let button = PaletteButton(title: title, kind: kind, target: self, action: action)
         button.isEnabled = enabled
         button.toolTip = toolTip
-        button.setContentHuggingPriority(.required, for: .horizontal)
         return button
     }
 
@@ -24146,8 +24660,13 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
                                              accessibilityDescription: accessibilityTitle) ?? NSImage(),
                               target: self,
                               action: action)
-        button.bezelStyle = .texturedRounded
-        button.controlSize = .small
+        button.isBordered = false
+        button.wantsLayer = true
+        button.contentTintColor = enabled ? Palette.inkMuted : Palette.inkFaint
+        button.layer?.cornerRadius = 7
+        button.layer?.backgroundColor = Palette.surface.cgColor
+        button.layer?.borderWidth = 1
+        button.layer?.borderColor = Palette.border.cgColor
         button.isEnabled = enabled
         button.toolTip = toolTip
         button.setAccessibilityLabel(accessibilityTitle)
@@ -24160,15 +24679,96 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
     }
 
     private func compactCard() -> NSView {
-        let card = NSView()
-        card.wantsLayer = true
-        card.layer?.cornerRadius = 8
-        card.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.70).cgColor
-        card.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.42).cgColor
-        card.layer?.borderWidth = 1
+        let card = PaletteBlock(fill: Palette.surface, stroke: Palette.border, radius: 10)
         card.setContentHuggingPriority(.required, for: .vertical)
         card.setContentCompressionResistancePriority(.required, for: .vertical)
         return card
+    }
+
+    /// Small caps label that opens a section. Claude sets these wide and quiet;
+    /// AppKit needs the tracking applied by hand.
+    private func sectionLabel(_ text: String) -> NSTextField {
+        let label = NSTextField(labelWithString: text.uppercased())
+        label.attributedStringValue = NSAttributedString(
+            string: text.uppercased(),
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+                .foregroundColor: Palette.inkFaint,
+                .kern: 0.85,
+            ]
+        )
+        label.setContentHuggingPriority(.required, for: .horizontal)
+        return label
+    }
+
+    private func hairline() -> NSView {
+        let line = PaletteBlock(fill: Palette.border)
+        line.translatesAutoresizingMaskIntoConstraints = false
+        line.heightAnchor.constraint(equalToConstant: 1).isActive = true
+        return line
+    }
+
+    /// One block of the panel: a small caps heading with an optional value on
+    /// the right, then the block's own content underneath.
+    private func section(_ title: String, accessory: NSView? = nil, content: NSView) -> NSView {
+        let heading = NSStackView()
+        heading.orientation = .horizontal
+        heading.alignment = .centerY
+        heading.spacing = 8
+        heading.addArrangedSubview(sectionLabel(title))
+        heading.addArrangedSubview(NSView())
+        if let accessory {
+            heading.addArrangedSubview(accessory)
+        }
+
+        let block = NSStackView()
+        block.orientation = .vertical
+        block.alignment = .leading
+        block.spacing = 9
+        block.addArrangedSubview(heading)
+        block.addArrangedSubview(content)
+        heading.widthAnchor.constraint(equalTo: block.widthAnchor).isActive = true
+        content.widthAnchor.constraint(equalTo: block.widthAnchor).isActive = true
+        return block
+    }
+
+    /// Coloured dot instead of a glyph: the status is one bit of information
+    /// and reads faster as a mark than as an icon.
+    private func statusDot(_ color: NSColor) -> NSView {
+        let dot = PaletteBlock(fill: color, radius: 4)
+        dot.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            dot.widthAnchor.constraint(equalToConstant: 8),
+            dot.heightAnchor.constraint(equalToConstant: 8),
+        ])
+        let holder = NSView()
+        holder.translatesAutoresizingMaskIntoConstraints = false
+        holder.addSubview(dot)
+        NSLayoutConstraint.activate([
+            holder.widthAnchor.constraint(equalToConstant: 8),
+            holder.heightAnchor.constraint(equalToConstant: 16),
+            dot.centerXAnchor.constraint(equalTo: holder.centerXAnchor),
+            dot.centerYAnchor.constraint(equalTo: holder.centerYAnchor),
+        ])
+        holder.setContentHuggingPriority(.required, for: .horizontal)
+        return holder
+    }
+
+    private func versionChip() -> NSView {
+        let chip = PaletteBlock(fill: Palette.sunk, stroke: Palette.border, radius: 6)
+        let label = panelLabel("v\(currentBundleVersion())", size: 10.5, weight: .medium, color: Palette.inkMuted)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        chip.addSubview(label)
+        chip.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: chip.leadingAnchor, constant: 7),
+            label.trailingAnchor.constraint(equalTo: chip.trailingAnchor, constant: -7),
+            label.centerYAnchor.constraint(equalTo: chip.centerYAnchor),
+            chip.heightAnchor.constraint(equalToConstant: 20),
+        ])
+        chip.setContentHuggingPriority(.required, for: .horizontal)
+        chip.toolTip = t("Установленная версия Planetka", "Installed Planetka version")
+        return chip
     }
 
     private func panelSymbol(_ name: String,
@@ -24403,10 +25003,10 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
 
     private func colorForStatus(_ raw: String) -> NSColor {
         switch raw {
-        case "ready", "recording", "transcribing": return .systemGreen
-        case "starting", "needs_permissions", "stopping": return .systemOrange
-        case "error", "stopped": return .systemRed
-        default: return .secondaryLabelColor
+        case "ready", "recording", "transcribing": return Palette.positive
+        case "starting", "needs_permissions", "stopping": return Palette.attention
+        case "error", "stopped": return Palette.danger
+        default: return Palette.inkMuted
         }
     }
 
@@ -24672,8 +25272,12 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         }
     }
 
-    @objc private func selectInterfaceLanguage(_ sender: NSSegmentedControl) {
-        settings.interfaceLanguage = sender.selectedSegment == 1 ? .english : .russian
+    @objc private func languageToggleClicked(_ sender: NSButton) {
+        applyInterfaceLanguage(sender.tag == 1 ? .english : .russian)
+    }
+
+    private func applyInterfaceLanguage(_ chosen: InterfaceLanguage) {
+        settings.interfaceLanguage = chosen
         _ = settings.refreshFromDisk()
         DistributedNotificationCenter.default().postNotificationName(
             SETTINGS_CHANGED_NOTIFICATION,
@@ -24696,6 +25300,13 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
     @objc private func toggleAlternateCompletion(_ sender: NSSwitch) {
         var draft = settingsDraft ?? ControlPanelSettingsDraft(settings: settings)
         draft.alternateCompletionEnabled = sender.state == .on
+        settingsDraft = draft
+        refreshSettingsWindow()
+    }
+
+    @objc private func toggleSpeechLanguageColors(_ sender: NSSwitch) {
+        var draft = settingsDraft ?? ControlPanelSettingsDraft(settings: settings)
+        draft.speechLanguageColors = sender.state == .on
         settingsDraft = draft
         refreshSettingsWindow()
     }
@@ -24919,6 +25530,7 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
         settings.aiCleanupModel = draft.aiCleanupModel
         settings.inputDevice = draft.inputDevicePreference
         settings.removeFinalPeriod = draft.removeFinalPeriod
+        settings.speechLanguageColors = draft.speechLanguageColors
         settings.recordingHUDRecordingColor = draft.recordingColor
         settings.recordingHUDTranscribingColor = draft.transcribingColor
         settings.recordingHUDBackgroundStyle = draft.backgroundStyle
