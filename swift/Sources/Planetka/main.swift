@@ -108,6 +108,12 @@ let RECORDING_HUD_FINISH_DRAW_SECONDS: TimeInterval = 0.42
 let RECORDING_HUD_FINISH_HOLD_SECONDS: TimeInterval = 0.34
 /// How much speech to gather before asking the model which language it is.
 let SPEECH_LANGUAGE_PROBE_DELAY_SECONDS: TimeInterval = 1.2
+/// How often to ask again, so switching language mid-dictation recolours the
+/// capsule instead of keeping whatever the first words were.
+let SPEECH_LANGUAGE_PROBE_INTERVAL_SECONDS: TimeInterval = 1.3
+/// Only the tail of the recording is probed: a switch to English three
+/// sentences in would otherwise stay outvoted by all the Russian before it.
+let SPEECH_LANGUAGE_PROBE_WINDOW_SECONDS: Double = 2.6
 let HOTKEY_CAPTURE_BEGIN_NOTIFICATION = Notification.Name("com.local.planetka.hotkey-capture-begin")
 let HOTKEY_CAPTURE_END_NOTIFICATION = Notification.Name("com.local.planetka.hotkey-capture-end")
 let SETTINGS_CHANGED_NOTIFICATION = Notification.Name("com.local.planetka.settings-changed")
@@ -6104,6 +6110,22 @@ let SPEECH_LANGUAGE_MIN_LETTERS = 3
 /// English terms in it keep Cyrillic under twice the Latin count.
 let SPEECH_LANGUAGE_DOMINANT_SHARE = 0.6
 
+/// The slice of captured audio the next probe should listen to.
+func speechLanguageProbeWindow(_ samples: [Float],
+                               sampleRate: Double = 16_000,
+                               windowSeconds: Double = SPEECH_LANGUAGE_PROBE_WINDOW_SECONDS) -> [Float] {
+    let windowSamples = Int(sampleRate * windowSeconds)
+    guard samples.count > windowSamples else { return samples }
+    return Array(samples.suffix(windowSamples))
+}
+
+/// What the capsule should show after a probe. An unclear reading holds the
+/// colour that is already on screen: dropping back mid-phrase would look like
+/// a glitch, and the next probe is only a second away.
+func nextSpeechLanguage(current: SpeechLanguage, detected: SpeechLanguage) -> SpeechLanguage {
+    detected == .unknown ? current : detected
+}
+
 func detectSpeechLanguage(in text: String) -> SpeechLanguage {
     var cyrillic = 0
     var latin = 0
@@ -8303,69 +8325,21 @@ private func systemAudioMuteWatchdogScript() -> String {
 
 // MARK: - Sounds
 //
-// Short system sounds: Purr on recording start, Bottle after a
-// successful paste, and a lowered Bottle when a dictation is dropped.
-// Chosen to be soft rather than attention-grabbing — they fire on every
-// dictation. Loaded from /System/Library/Sounds so we don't have to
-// bundle audio resources.
+// Short system sounds: Tink on recording start, Pop after a
+// successful paste, Basso when a dictation is dropped. Loaded from
+// /System/Library/Sounds so we don't have to bundle audio resources.
 
 @MainActor
 enum Sounds {
-    private static let start = systemSound("Purr", volume: 0.45)
-    private static let done = systemSound("Bottle", volume: 0.40)
-    private static let error = pitchedSound("Bottle", rate: 0.7, volume: 0.35)
+    private static let start = systemSound("Tink", volume: 0.55)
+    private static let done = systemSound("Pop", volume: 0.45)
+    private static let error = systemSound("Basso", volume: 0.30)
 
     private static func systemSound(_ name: String, volume: Float) -> NSSound? {
         let path = "/System/Library/Sounds/\(name).aiff"
         guard let sound = NSSound(contentsOfFile: path, byReference: true) else { return nil }
         sound.volume = volume
         return sound
-    }
-
-    /// NSSound cannot vary playback rate, so the darker error cue is rendered
-    /// once into the temporary directory: re-labelling the sample rate lowers
-    /// pitch and speed together, the way `afplay -r` does. Falls back to the
-    /// untouched system sound when rendering is unavailable.
-    private static func pitchedSound(_ name: String, rate: Double, volume: Float) -> NSSound? {
-        let destination = FileManager.default.temporaryDirectory
-            .appendingPathComponent("planetka-\(name.lowercased())-\(Int(rate * 100)).aiff")
-        guard renderPitchedSound(named: name, to: destination, rate: rate),
-              let sound = NSSound(contentsOf: destination, byReference: true)
-        else { return systemSound(name, volume: volume) }
-        sound.volume = volume
-        return sound
-    }
-
-    nonisolated static func renderPitchedSound(named name: String, to destination: URL, rate: Double) -> Bool {
-        let source = URL(fileURLWithPath: "/System/Library/Sounds/\(name).aiff")
-        guard rate > 0,
-              let input = try? AVAudioFile(forReading: source) else { return false }
-        let format = input.processingFormat
-        guard input.length > 0,
-              let original = AVAudioPCMBuffer(pcmFormat: format,
-                                              frameCapacity: AVAudioFrameCount(input.length)),
-              (try? input.read(into: original)) != nil,
-              let samples = original.floatChannelData,
-              let lowered = AVAudioFormat(standardFormatWithSampleRate: format.sampleRate * rate,
-                                          channels: format.channelCount),
-              let relabelled = AVAudioPCMBuffer(pcmFormat: lowered,
-                                                frameCapacity: original.frameLength),
-              let target = relabelled.floatChannelData else { return false }
-        let bytes = Int(original.frameLength) * MemoryLayout<Float>.size
-        for channel in 0..<Int(format.channelCount) {
-            memcpy(target[channel], samples[channel], bytes)
-        }
-        relabelled.frameLength = original.frameLength
-        try? FileManager.default.removeItem(at: destination)
-        guard let output = try? AVAudioFile(forWriting: destination, settings: [
-            AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: lowered.sampleRate,
-            AVNumberOfChannelsKey: lowered.channelCount,
-            AVLinearPCMBitDepthKey: 16,
-            AVLinearPCMIsFloatKey: false,
-            AVLinearPCMIsBigEndianKey: true
-        ]) else { return false }
-        return (try? output.write(from: relabelled)) != nil
     }
 
     static func playStart() { start?.stop(); start?.play() }
@@ -12403,9 +12377,11 @@ final class PlanetkaApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    /// One early pass over the speech captured so far, purely to colour the
-    /// capsule while the user is still talking. The model returns text only,
-    /// so this is the earliest moment the language can be known at all.
+    /// Repeated passes over the tail of the speech captured so far, purely to
+    /// colour the capsule while the user is still talking. The model returns
+    /// text only, so a pass like this is the earliest the language can be known
+    /// at all — and repeating it is what lets a switch to another language
+    /// mid-dictation recolour the capsule.
     ///
     /// It runs on the same worker as the real transcription, which is why
     /// `handleRelease` awaits it: the Neural Engine refuses two inferences at
@@ -12421,23 +12397,28 @@ final class PlanetkaApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let capture = audio
         let language = settings.dictationLanguage.fluidLanguage
         speechLanguageProbe = Task { @MainActor [weak self] in
-            try? await Task.sleep(
-                nanoseconds: UInt64(SPEECH_LANGUAGE_PROBE_DELAY_SECONDS * 1_000_000_000)
-            )
-            guard let self, self.isRecording, !Task.isCancelled else { return }
-            let captured = capture.snapshotSamples()
-            // Under half a second of audio says nothing about language.
-            guard captured.count >= 8_000 else { return }
-            let requestedAt = ProcessInfo.processInfo.systemUptime
-            guard let probe = try? await worker.transcribe(samples: captured,
-                                                           language: language,
-                                                           requestedAt: requestedAt)
-            else { return }
-            guard self.isRecording else { return }
-            let detected = detectSpeechLanguage(in: probe.text)
-            guard detected != .unknown, let accent = detected.hudAccent else { return }
-            self.recordingHUDView?.languageAccent = accent
-            log("speech language: \(detected.rawValue)")
+            var shown = SpeechLanguage.unknown
+            var wait = SPEECH_LANGUAGE_PROBE_DELAY_SECONDS
+            while true {
+                try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                wait = SPEECH_LANGUAGE_PROBE_INTERVAL_SECONDS
+                guard let self, self.isRecording, !Task.isCancelled else { return }
+                let captured = speechLanguageProbeWindow(capture.snapshotSamples())
+                // Under half a second of audio says nothing about language.
+                guard captured.count >= 8_000 else { continue }
+                let requestedAt = ProcessInfo.processInfo.systemUptime
+                guard let probe = try? await worker.transcribe(samples: captured,
+                                                               language: language,
+                                                               requestedAt: requestedAt)
+                else { continue }
+                guard self.isRecording else { return }
+                let next = nextSpeechLanguage(current: shown,
+                                              detected: detectSpeechLanguage(in: probe.text))
+                guard next != shown else { continue }
+                shown = next
+                self.recordingHUDView?.languageAccent = next.hudAccent
+                log("speech language: \(next.rawValue)")
+            }
         }
     }
 
@@ -13194,6 +13175,10 @@ final class PlanetkaApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let language = settings.dictationLanguage.fluidLanguage
         let pendingLanguageProbe = speechLanguageProbe
         speechLanguageProbe = nil
+        // Cancelling wakes the loop out of its sleep immediately; awaiting it
+        // below still waits for any inference already running, which is what
+        // keeps the Neural Engine to one call at a time.
+        pendingLanguageProbe?.cancel()
         let transcriptionTask = Task.detached(priority: .userInitiated) {
             // Never overlap with the language probe: one inference at a time.
             await pendingLanguageProbe?.value
@@ -17585,8 +17570,6 @@ private enum PlanetkaSelfTest {
             return runSuite("insertion-target", testInsertionTargetTracking)
         case "legacy-rename":
             return runSuite("legacy-rename", testLegacyRenameMigration)
-        case "sounds":
-            return runSuite("sounds", testPitchedSoundRendering)
         case "speech-language":
             return runSuite("speech-language", testSpeechLanguageDetection)
         case "insertion-target-live":
@@ -17638,7 +17621,6 @@ private enum PlanetkaSelfTest {
         try testInsertionTargetTracking()
         try testLegacyRenameMigration()
         try testSpeechLanguageDetection()
-        try testPitchedSoundRendering()
     }
 
     private static func testAICleanup() throws {
@@ -20108,6 +20090,23 @@ private enum PlanetkaSelfTest {
                                       transcribingColor: userTranscribing) == userTranscribing,
                    equals: true,
                    "without a language the user's own transcribing colour still applies")
+        let long = Array(repeating: Float(0), count: 16_000 * 6) + Array(repeating: Float(0.5), count: 1_600)
+        let window = speechLanguageProbeWindow(long)
+        try expect(window.count, equals: Int(16_000 * SPEECH_LANGUAGE_PROBE_WINDOW_SECONDS),
+                   "a long recording should be probed by its tail, not in full")
+        try expect(window.suffix(1_600).allSatisfy { $0 == 0.5 }, equals: true,
+                   "the probe window must be the most recent audio")
+        let short = Array(repeating: Float(0.2), count: 8_000)
+        try expect(speechLanguageProbeWindow(short).count, equals: short.count,
+                   "a recording shorter than the window is probed whole")
+
+        try expect(nextSpeechLanguage(current: .russian, detected: .unknown), equals: .russian,
+                   "an unclear probe must hold the colour already showing")
+        try expect(nextSpeechLanguage(current: .russian, detected: .english), equals: .english,
+                   "switching language mid-dictation should recolour the capsule")
+        try expect(nextSpeechLanguage(current: .unknown, detected: .english), equals: .english,
+                   "the first clear probe sets the colour")
+
         try expect(recordingHUDAccent(mode: .finished,
                                       languageAccent: red,
                                       recordingColor: userRecording,
@@ -22844,35 +22843,6 @@ private enum PlanetkaSelfTest {
         )
     }
 
-    private static func testPitchedSoundRendering() throws {
-        let fm = FileManager.default
-        let destination = fm.temporaryDirectory
-            .appendingPathComponent("planetka-selftest-pitch-\(UUID().uuidString).aiff")
-        defer { try? fm.removeItem(at: destination) }
-
-        let source = URL(fileURLWithPath: "/System/Library/Sounds/Bottle.aiff")
-        guard let input = try? AVAudioFile(forReading: source) else {
-            throw SelfTestFailure.failed("system sound Bottle.aiff should be readable")
-        }
-        try expect(Sounds.renderPitchedSound(named: "Bottle", to: destination, rate: 0.7),
-                   equals: true,
-                   "lowering a system sound should produce a playable file")
-
-        guard let rendered = try? AVAudioFile(forReading: destination) else {
-            throw SelfTestFailure.failed("the lowered sound should be readable back")
-        }
-        let expectedRate = (input.fileFormat.sampleRate * 0.7).rounded()
-        try expect(rendered.fileFormat.sampleRate.rounded(),
-                   equals: expectedRate,
-                   "the lowered sound should carry the scaled sample rate")
-        try expect(rendered.length,
-                   equals: input.length,
-                   "lowering should re-label the samples, never drop any")
-        try expect(Sounds.renderPitchedSound(named: "NoSuchSystemSound", to: destination, rate: 0.7),
-                   equals: false,
-                   "a missing system sound should fail rendering instead of trapping")
-    }
-
     private static func expect<T: Equatable>(
         _ actual: T,
         equals expected: T,
@@ -24582,8 +24552,8 @@ private final class PlanetkaControlPanelApp: NSObject, NSApplicationDelegate, NS
                                            size: 13,
                                            weight: .semibold))
         let detail = panelLabel(
-            t("Русская речь — красная капсула, английская — синяя. Язык определяется через секунду после начала речи. Выключено — работает ваш цвет записи.",
-              "Russian speech turns the capsule red, English turns it blue. The language is known about a second in. Off leaves your own recording colour in place."),
+            t("Русская речь — красная капсула, английская — синяя. Первый цвет появляется через секунду и меняется на лету, если вы переходите на другой язык. Выключено — работает ваш цвет записи.",
+              "Russian speech turns the capsule red, English turns it blue. The first colour appears a second in and follows you if you switch language mid-dictation. Off leaves your own recording colour in place."),
             size: 12,
             color: Palette.inkMuted
         )
